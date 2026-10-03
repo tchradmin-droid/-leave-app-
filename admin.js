@@ -463,7 +463,7 @@
       };
       $app.innerHTML = '<a class="linkbtn" href="#emps">‹ พนักงาน</a><div class="page-head"><h1>' + (isNew ? 'เพิ่มพนักงาน' : esc(e.name)) + '</h1></div>' +
         '<div class="grid2"><form class="panel" id="ef"><h2 style="margin-top:0">ข้อมูลพนักงาน</h2><div class="form-grid">' +
-        f('emp_id', isNew ? 'รหัสพนักงาน (ระบบกำหนดให้อัตโนมัติ)' : 'รหัสพนักงาน', 'text', e.emp_id, ' readonly') +
+        f('emp_id', isNew ? 'รหัสพนักงาน' : 'รหัสพนักงาน', 'text', e.emp_id, ' readonly') +
         '<label class="field"><span>คำนำหน้า</span><select name="title"' + dis + '>' + ['นาย', 'นาง', 'นางสาว'].map(function (t) { return '<option' + (e.title === t ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select></label>' +
         f('first_name', 'ชื่อ', 'text', e.first_name) + f('last_name', 'นามสกุล', 'text', e.last_name) + f('nickname', 'ชื่อเล่น', 'text', e.nickname) +
         '<label class="field"><span>แผนก</span><select name="dept_id"' + dis + '>' + A.setup.departments.map(function (d) { return '<option value="' + esc(d.dept_id) + '"' + (d.dept_id === e.dept_id ? ' selected' : '') + '>' + esc(d.name) + '</option>'; }).join('') + '</select></label>' +
