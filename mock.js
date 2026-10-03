@@ -14,7 +14,7 @@ function __sheet(name) {
   var rows = __sheets[name] = __sheets[name] || [];
   return {
     getLastRow: function () { var n = rows.length; while (n > 0 && rows[n - 1].every(function (v) { return v === ''; })) n--; return n; },
-    getMaxColumns: function () { return 30; }, getName: function () { return name; },
+    getMaxColumns: function () { return 30; }, getName: function () { return name; }, deleteRow: function (r) { rows.splice(r - 1, 1); },
     getRange: function (r, c, nr, nc) {
       nr = nr || 1; nc = nc || 1;
       return {
@@ -312,6 +312,15 @@ function updateWhere(name, keyCol, keyVal, patch) {
       sh.getRange(merged._row, 1, 1, SCHEMA[name].length).setValues([objToRow_(name, merged)]);
       return before;
     }
+  }
+  return null;
+}
+
+/** Delete the first row where keyCol === keyVal. Returns the deleted object or null. */
+function deleteWhere(name, keyCol, keyVal) {
+  var rows = readAll(name);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][keyCol]) === String(keyVal)) { sheet_(name).deleteRow(rows[i]._row); return rows[i]; }
   }
   return null;
 }
@@ -941,7 +950,12 @@ function verifyLineIdToken(idToken) {
   var res = UrlFetchApp.fetch('https://api.line.me/oauth2/v2.1/verify', {
     method: 'post', muteHttpExceptions: true, payload: { id_token: idToken, client_id: channelId }
   });
-  if (res.getResponseCode() !== 200) fail_('AUTH', 'การเข้าสู่ระบบหมดอายุ กรุณาเปิดแอปใหม่');
+  if (res.getResponseCode() !== 200) {
+    var why = ''; try { why = JSON.parse(res.getContentText()).error_description || ''; } catch (e) { }
+    console.warn('LINE verify failed: ' + res.getResponseCode() + ' ' + res.getContentText());
+    if (/client_id|audience/i.test(why)) fail_('CONFIG', 'ตั้งค่า LINE_LOGIN_CHANNEL_ID ไม่ตรงกับช่อง LINE Login ของ LIFF (' + why + ')');
+    fail_('AUTH', 'การเข้าสู่ระบบหมดอายุ กรุณาเปิดแอปใหม่' + (why ? ' (' + why + ')' : ''));
+  }
   var j = JSON.parse(res.getContentText());
   var out = { sub: j.sub, name: j.name || '' };
   var ttl = Math.max(60, Math.min(600, (j.exp || 0) - Math.floor(Date.now() / 1000)));
@@ -1163,6 +1177,11 @@ function thaiDate(iso) {
 function testLineSetup() {
   var problems = [];
   ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_LOGIN_CHANNEL_ID', 'LIFF_ID'].forEach(function (k) { if (!prop_(k)) problems.push('ยังไม่ได้ใส่ ' + k); });
+  var liffPrefix = prop_('LIFF_ID').split('-')[0];
+  if (prop_('LIFF_ID') && prop_('LINE_LOGIN_CHANNEL_ID')) {
+    if (liffPrefix === prop_('LINE_LOGIN_CHANNEL_ID').trim()) problems.push('✓ LINE_LOGIN_CHANNEL_ID ตรงกับ LIFF_ID');
+    else problems.push('✗ LINE_LOGIN_CHANNEL_ID (' + prop_('LINE_LOGIN_CHANNEL_ID') + ') ไม่ตรงกับตัวเลขหน้า LIFF_ID (' + liffPrefix + ') — ใส่ ' + liffPrefix);
+  }
   if (prop_('LINE_CHANNEL_ACCESS_TOKEN')) {
     var r = UrlFetchApp.fetch('https://api.line.me/v2/bot/info', { headers: { Authorization: 'Bearer ' + prop_('LINE_CHANNEL_ACCESS_TOKEN') }, muteHttpExceptions: true });
     if (r.getResponseCode() === 200) problems.push('✓ Access token ใช้ได้ (OA: ' + JSON.parse(r.getContentText()).displayName + ')');
@@ -1253,7 +1272,27 @@ var ROUTES = {
   adjustBalance: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return adjustBalance(a, d.emp_id, d.type_id, d.delta, d.reason); } },
   employees: { auth: 'admin', roles: ALL_USERS, fn: apiEmployees_ },
   employeeBalances: { auth: 'admin', roles: ALL_USERS, fn: apiEmployeeBalances_ },
-  requests: { auth: 'admin', roles: ALL_USERS, fn: apiListRequests_ }
+  requests: { auth: 'admin', roles: ALL_USERS, fn: apiListRequests_ },
+
+  // ---- admin page (Admin.gs)
+  dashboard: { auth: 'admin', roles: ALL_USERS, fn: function (a) { return dashboard_(a); } },
+  setup: { auth: 'admin', roles: ALL_USERS, fn: function (a) { return adminSetup_(a); } },
+  saveEmployee: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveEmployee(a, d); } },
+  unlinkLine: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return unlinkEmployeeLine(a, d.emp_id); } },
+  saveDepartment: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveDepartment(a, d); } },
+  saveHoliday: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveHoliday(a, d); } },
+  deleteHoliday: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return deleteHoliday(a, d.date); } },
+  saveLeaveType: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveLeaveType(a, d); } },
+  saveSettings: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveSettings(a, d); } },
+  adminUsers: { auth: 'admin', roles: ADMINS, fn: function (a) { return listAdminUsers(a); } },
+  saveAdminUser: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveAdminUser(a, d); } },
+  resetAdminPassword: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return resetAdminPassword(a, d.username); } },
+  adminLinkCode: { auth: 'admin', roles: ALL_USERS, fn: function (a) { return createAdminLinkCode(a); } },
+  linkAdminByCode: { auth: 'line', fn: function (a, d, b) { return linkAdminByCode(b.idToken, d.code); } },
+  audit: { auth: 'admin', roles: ALL_USERS, fn: function (a, d) { return auditLog_(a, d); } },
+  reportBalances: { auth: 'admin', roles: ALL_USERS, fn: function (a) { return reportBalances_(a); } },
+  reportPayroll: { auth: 'admin', roles: ALL_USERS, fn: function (a, d) { return reportPayroll_(a, d); } },
+  reportStats: { auth: 'admin', roles: ALL_USERS, fn: function (a, d) { return reportStats_(a, d); } }
 };
 
 /* ------------------------------------------------------------------ handlers */
@@ -1348,7 +1387,11 @@ function apiEmployees_(actor) {
 function apiEmployeeBalances_(actor, d) {
   var state = loadState(), emp = findEmp_(state, d.emp_id);
   if (!emp) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
-  return { emp_id: emp.emp_id, name: empName(emp), balances: balancesNow(state, emp),
+  var detail = {};
+  ['emp_id', 'title', 'first_name', 'last_name', 'nickname', 'dept_id', 'position', 'hire_date', 'birth_date', 'phone', 'email', 'status', 'resign_date']
+    .forEach(function (k) { detail[k] = emp[k]; });
+  detail.line_linked = !!str(emp.line_user_id);
+  return { emp_id: emp.emp_id, name: empName(emp), employee: detail, balances: balancesNow(state, emp),
     ledger: state.ledger.filter(function (l) { return str(l.emp_id) === str(emp.emp_id); }) };
 }
 
@@ -1499,6 +1542,337 @@ function morningJob() {
   });
 }
 
+/**
+ * ระบบลา — Admin.gs
+ * Actions for the admin web page (username users): master data, settings, user accounts,
+ * dashboard and reports, and linking an admin's LINE for alerts.
+ * Roles: ADMIN and SUPER_ADMIN can change things; OWNER can only read.
+ */
+
+function requireAdmin_(actor) { if (!isAdminRole_(actor)) fail_('FORBIDDEN', 'สำหรับผู้ดูแลระบบเท่านั้น'); }
+function pick_(src, keys) { var o = {}; keys.forEach(function (k) { if (src[k] !== undefined) o[k] = typeof src[k] === 'string' ? src[k].trim() : src[k]; }); return o; }
+
+/* ------------------------------------------------------------------ employees */
+
+var EMP_EDITABLE = ['title', 'first_name', 'last_name', 'nickname', 'dept_id', 'position', 'hire_date', 'birth_date', 'phone', 'email', 'status', 'resign_date'];
+
+function saveEmployee(actor, d) {
+  requireAdmin_(actor);
+  var res = withLock(function () {
+    var state = loadState(), id = str(d.emp_id);
+    if (!id) fail_('BAD_VALUE', 'กรุณาใส่รหัสพนักงาน');
+    var patch = pick_(d, EMP_EDITABLE);
+    ['hire_date', 'birth_date', 'resign_date'].forEach(function (k) { if (k in patch) patch[k] = toIso(patch[k]); });
+    if (patch.title && ['นาย', 'นาง', 'นางสาว'].indexOf(patch.title) === -1) fail_('BAD_VALUE', 'คำนำหน้าไม่ถูกต้อง');
+    if (patch.dept_id && !findDept_(state, patch.dept_id)) fail_('BAD_VALUE', 'ไม่พบรหัสแผนก');
+    if (patch.status && ['ACTIVE', 'RESIGNED'].indexOf(patch.status) === -1) fail_('BAD_VALUE', 'สถานะไม่ถูกต้อง');
+    if (patch.status === 'RESIGNED' && !patch.resign_date) fail_('BAD_VALUE', 'กรุณาใส่วันที่ลาออก');
+    if (patch.status === 'ACTIVE') patch.resign_date = '';
+    var existing = findEmp_(state, id);
+    patch.updated_at = nowStamp();
+    if (existing) {
+      if (patch.status === 'RESIGNED' && state.departments.some(function (x) { return str(x.head_emp_id) === id; }))
+        fail_('IS_HEAD', 'พนักงานคนนี้เป็นหัวหน้าแผนก กรุณาเปลี่ยนหัวหน้าแผนกก่อน');
+      var before = updateWhere(SHEETS.EMPLOYEES, 'emp_id', id, patch);
+      audit(actor.user.username, actor.user.role, 'EMPLOYEE_UPDATE', 'Employee', id, before, patch);
+    } else {
+      ['title', 'first_name', 'last_name', 'dept_id', 'hire_date', 'birth_date'].forEach(function (k) {
+        if (!patch[k]) fail_('BAD_VALUE', 'กรุณากรอกข้อมูลให้ครบ (' + k + ')');
+      });
+      patch.emp_id = id; patch.status = patch.status || 'ACTIVE'; patch.created_at = patch.updated_at;
+      appendObjects(SHEETS.EMPLOYEES, [patch]);
+      audit(actor.user.username, actor.user.role, 'EMPLOYEE_CREATE', 'Employee', id, null, patch);
+    }
+    return { ok: true };
+  });
+  ensureGrants_(); // new hire or changed hire date: make sure this leave year's quota exists
+  return res;
+}
+
+function unlinkEmployeeLine(actor, empId) {
+  requireAdmin_(actor);
+  var before = updateWhere(SHEETS.EMPLOYEES, 'emp_id', empId, { line_user_id: '', line_linked_at: '', updated_at: nowStamp() });
+  if (!before) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
+  audit(actor.user.username, actor.user.role, 'LINE_UNLINKED', 'Employee', empId, { line_user_id: before.line_user_id }, null);
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ departments, holidays, leave types, settings */
+
+function saveDepartment(actor, d) {
+  requireAdmin_(actor);
+  return withLock(function () {
+    var state = loadState(), id = str(d.dept_id);
+    if (!id || !str(d.name)) fail_('BAD_VALUE', 'กรุณาใส่รหัสและชื่อแผนก');
+    if (str(d.head_emp_id) && !findEmp_(state, d.head_emp_id)) fail_('BAD_VALUE', 'ไม่พบรหัสหัวหน้าแผนก');
+    var patch = { name: str(d.name), head_emp_id: str(d.head_emp_id), max_concurrent: Number(d.max_concurrent || state.settings.dept_max_concurrent || 1),
+      active: d.active === undefined ? true : !!d.active };
+    var before = findDept_(state, id) ? updateWhere(SHEETS.DEPARTMENTS, 'dept_id', id, patch) : null;
+    if (!before) { patch.dept_id = id; appendObjects(SHEETS.DEPARTMENTS, [patch]); }
+    audit(actor.user.username, actor.user.role, before ? 'DEPT_UPDATE' : 'DEPT_CREATE', 'Department', id, before, patch);
+    return { ok: true };
+  });
+}
+
+function saveHoliday(actor, d) {
+  requireAdmin_(actor);
+  var date = toIso(d.date);
+  if (!date || !str(d.name_th)) fail_('BAD_VALUE', 'กรุณาใส่วันที่และชื่อวันหยุด');
+  return withLock(function () {
+    var before = updateWhere(SHEETS.HOLIDAYS, 'date', date, { name_th: str(d.name_th) });
+    if (!before) appendObjects(SHEETS.HOLIDAYS, [{ date: date, name_th: str(d.name_th) }]);
+    audit(actor.user.username, actor.user.role, 'HOLIDAY_SAVE', 'Holiday', date, before, d);
+    return { ok: true };
+  });
+}
+
+function deleteHoliday(actor, date) {
+  requireAdmin_(actor);
+  return withLock(function () {
+    var gone = deleteWhere(SHEETS.HOLIDAYS, 'date', toIso(date));
+    if (!gone) fail_('NOT_FOUND', 'ไม่พบวันหยุด');
+    audit(actor.user.username, actor.user.role, 'HOLIDAY_DELETE', 'Holiday', gone.date, gone, null);
+    return { ok: true };
+  });
+}
+
+var TYPE_EDITABLE = ['name_th', 'annual_quota', 'max_days_per_request', 'eligible_after_months', 'notice_days', 'takes_slot',
+  'blocked_by_slot', 'doc_rule', 'doc_min_days', 'paid_note', 'filing_window_days', 'color', 'active', 'sort'];
+
+function saveLeaveType(actor, d) {
+  requireAdmin_(actor);
+  return withLock(function () {
+    var state = loadState(), id = str(d.type_id).toUpperCase().replace(/[^A-Z0-9_]/g, '');
+    if (!id || !str(d.name_th)) fail_('BAD_VALUE', 'กรุณาใส่รหัสและชื่อประเภทการลา');
+    var patch = pick_(d, TYPE_EDITABLE);
+    if (patch.doc_rule && ['NONE', 'OPTIONAL', 'REQUIRED', 'REQUIRED_IF_MIN_DAYS'].indexOf(patch.doc_rule) === -1) fail_('BAD_VALUE', 'กฎเอกสารไม่ถูกต้อง');
+    ['takes_slot', 'blocked_by_slot', 'active'].forEach(function (k) { if (k in patch) patch[k] = !!patch[k]; });
+    var before = findType_(state, id) ? updateWhere(SHEETS.LEAVE_TYPES, 'type_id', id, patch) : null;
+    if (!before) {
+      patch.type_id = id; patch.color = patch.color || '#78909C'; patch.active = patch.active !== false;
+      patch.sort = patch.sort || state.types.length + 1; patch.doc_rule = patch.doc_rule || 'OPTIONAL';
+      appendObjects(SHEETS.LEAVE_TYPES, [patch]);
+    }
+    audit(actor.user.username, actor.user.role, before ? 'LEAVE_TYPE_UPDATE' : 'LEAVE_TYPE_CREATE', 'LeaveType', id, before, patch);
+    return { ok: true };
+  });
+}
+
+var SETTING_EDITABLE = ['work_days', 'self_service_after_months', 'escalation_hours', 'dept_max_concurrent', 'cert_reminder_max',
+  'attachment_retention_months', 'session_minutes', 'company_name'];
+
+function saveSettings(actor, map) {
+  requireAdmin_(actor);
+  var changed = {};
+  Object.keys(map || {}).forEach(function (k) {
+    if (SETTING_EDITABLE.indexOf(k) === -1) return;
+    var v = str(map[k]);
+    if (k === 'work_days' && !/^[1-7](,[1-7])*$/.test(v)) fail_('BAD_VALUE', 'วันทำงานต้องเป็นตัวเลข 1–7 คั่นด้วยจุลภาค');
+    if (k !== 'work_days' && k !== 'company_name' && !/^\d+$/.test(v)) fail_('BAD_VALUE', k + ' ต้องเป็นตัวเลข');
+    setSetting(k, v); changed[k] = v;
+  });
+  audit(actor.user.username, actor.user.role, 'SETTINGS_SAVE', 'Settings', '', null, changed);
+  return { ok: true };
+}
+
+function adminSetup_(actor) {
+  var state = loadState();
+  return {
+    departments: state.departments, holidays: readAll(SHEETS.HOLIDAYS).sort(function (a, b) { return a.date < b.date ? -1 : 1; }),
+    types: state.types.map(function (t) { var o = JSON.parse(JSON.stringify(t)); delete o._row; return o; }),
+    settings: SETTING_EDITABLE.reduce(function (o, k) { o[k] = state.settings[k] || ''; return o; }, {}),
+    employees: state.employees.filter(function (e) { return e.status === 'ACTIVE'; }).map(function (e) { return { emp_id: e.emp_id, name: empName(e), dept_id: e.dept_id }; })
+  };
+}
+
+/* ------------------------------------------------------------------ admin user accounts */
+
+function listAdminUsers(actor) {
+  requireAdmin_(actor);
+  return readAll(SHEETS.ADMIN_USERS).map(function (u) {
+    return { username: u.username, full_name: u.full_name, role: u.role, emp_id: u.emp_id, email: u.email, active: toBool(u.active),
+      line_linked: !!str(u.line_user_id), locked: str(u.locked_until) > nowStamp(), must_change: toBool(u.must_change_password) };
+  });
+}
+
+function saveAdminUser(actor, d) {
+  requireAdmin_(actor);
+  var role = str(d.role);
+  if (['ADMIN', 'SUPER_ADMIN', 'OWNER'].indexOf(role) === -1) fail_('BAD_VALUE', 'บทบาทไม่ถูกต้อง');
+  if (role === 'SUPER_ADMIN' && actor.user.role !== 'SUPER_ADMIN') fail_('FORBIDDEN', 'เฉพาะ Super-admin สร้างหรือแก้บัญชี Super-admin ได้');
+  return withLock(function () {
+    var users = readAll(SHEETS.ADMIN_USERS), uname = str(d.username);
+    var existing = users.filter(function (u) { return str(u.username).toLowerCase() === uname.toLowerCase(); })[0];
+    if (existing) {
+      if (existing.role === 'SUPER_ADMIN' && actor.user.role !== 'SUPER_ADMIN') fail_('FORBIDDEN', 'แก้บัญชี Super-admin ไม่ได้');
+      if (existing.username === actor.user.username && d.active === false) fail_('BAD_VALUE', 'ปิดบัญชีตัวเองไม่ได้');
+      var patch = { full_name: str(d.full_name) || existing.full_name, role: role,
+        active: d.active === undefined ? toBool(existing.active) : !!d.active };
+      if (d.emp_id !== undefined) patch.emp_id = str(d.emp_id);
+      if (d.email !== undefined) patch.email = str(d.email);
+      updateWhere(SHEETS.ADMIN_USERS, 'username', existing.username, patch);
+      audit(actor.user.username, actor.user.role, 'ADMIN_USER_UPDATE', 'AdminUser', existing.username, null, patch);
+      return { ok: true };
+    }
+    if (!/^[A-Za-z0-9._-]{4,}$/.test(uname)) fail_('BAD_VALUE', 'ชื่อผู้ใช้ต้องเป็นอังกฤษ/ตัวเลข/._- อย่างน้อย 4 ตัว');
+    if (!str(d.full_name)) fail_('BAD_VALUE', 'กรุณาใส่ชื่อ-นามสกุล');
+    var pw = randomToken(10), salt = randomToken(16);
+    appendObjects(SHEETS.ADMIN_USERS, [{ username: uname, full_name: str(d.full_name), role: role, emp_id: str(d.emp_id), email: str(d.email),
+      password_hash: hashPassword(pw, salt), salt: salt, must_change_password: true, active: true, failed_logins: 0, locked_until: '', created_at: nowStamp() }]);
+    audit(actor.user.username, actor.user.role, 'ADMIN_USER_CREATE', 'AdminUser', uname, null, { role: role });
+    return { ok: true, temp_password: pw };
+  });
+}
+
+function resetAdminPassword(actor, username) {
+  requireAdmin_(actor);
+  return withLock(function () {
+    var u = readAll(SHEETS.ADMIN_USERS).filter(function (x) { return x.username === username; })[0];
+    if (!u) fail_('NOT_FOUND', 'ไม่พบบัญชี');
+    if (u.role === 'SUPER_ADMIN' && actor.user.role !== 'SUPER_ADMIN') fail_('FORBIDDEN', 'รีเซ็ตรหัสผ่าน Super-admin ไม่ได้');
+    var pw = randomToken(10), salt = randomToken(16);
+    updateWhere(SHEETS.ADMIN_USERS, 'username', username, { password_hash: hashPassword(pw, salt), salt: salt, must_change_password: true, failed_logins: 0, locked_until: '' });
+    audit(actor.user.username, actor.user.role, 'ADMIN_PASSWORD_RESET', 'AdminUser', username, null, null);
+    return { ok: true, temp_password: pw };
+  });
+}
+
+/** Admin LINE link: the admin page shows a code; the admin opens the LIFF link with it on their phone. */
+function createAdminLinkCode(actor) {
+  var code = randomToken(8).toUpperCase();
+  CacheService.getScriptCache().put('alink:' + code, actor.user.username, 600);
+  return { code: code, liff_url: prop_('LIFF_ID') ? 'https://liff.line.me/' + prop_('LIFF_ID') + '?page=linkadmin&code=' + code : '' };
+}
+
+function linkAdminByCode(idToken, code) {
+  var who = verifyLineIdToken(idToken);
+  var cache = CacheService.getScriptCache(), username = cache.get('alink:' + str(code).toUpperCase());
+  if (!username) fail_('BAD_CODE', 'รหัสหมดอายุหรือไม่ถูกต้อง กรุณาสร้างรหัสใหม่ในหน้าผู้ดูแล');
+  updateWhere(SHEETS.ADMIN_USERS, 'username', username, { line_user_id: who.sub });
+  cache.remove('alink:' + str(code).toUpperCase());
+  audit(username, 'ADMIN', 'LINE_LINKED', 'AdminUser', username, null, { line_name: who.name });
+  return { ok: true, username: username };
+}
+
+function auditLog_(actor, d) {
+  var rows = readAll(SHEETS.AUDIT);
+  var q = str(d.q).toLowerCase();
+  if (q) rows = rows.filter(function (r) { return [r.actor, r.action, r.entity, r.entity_id].join(' ').toLowerCase().indexOf(q) !== -1; });
+  return rows.slice(-500).reverse().map(function (r) { delete r._row; return r; });
+}
+
+/* ------------------------------------------------------------------ dashboard + reports */
+
+function dashboard_(actor) {
+  var state = loadState(), t = state.today, open = ['PENDING', 'ESCALATED', 'CANCEL_REQUESTED'];
+  var active = state.employees.filter(function (e) { return e.status === 'ACTIVE'; });
+  var awayToday = state.requests.filter(function (r) { return TAKEN_REQ.indexOf(r.status) !== -1 && r.start_date <= t && r.end_date >= t; })
+    .map(function (r) { return reqForClient_(state, r); });
+  var missingCert = state.requests.filter(function (r) {
+    if (PENDING_REQ.indexOf(r.status) === -1) return false;
+    var ty = findType_(state, r.type_id);
+    var needs = ty && (ty.doc_rule === 'REQUIRED' || (ty.doc_rule === 'REQUIRED_IF_MIN_DAYS' && Number(r.working_days) >= Number(ty.doc_min_days || 999)));
+    return needs && !attachmentsOf_(state, r.req_id).length;
+  }).length;
+  // Days in the next 14 where a department has more people away than its limit (sick/accident overlaps).
+  var doubles = [];
+  state.departments.forEach(function (d) {
+    var max = Number(d.max_concurrent || 1), cnt = {};
+    state.requests.forEach(function (r) {
+      if (str(r.dept_id) !== str(d.dept_id) || TAKEN_REQ.indexOf(r.status) === -1) return;
+      var ty = findType_(state, r.type_id); if (!ty || !toBool(ty.takes_slot)) return;
+      reqDates_(state, r).forEach(function (x) { if (x >= t && x <= addDays(t, 14)) cnt[x] = (cnt[x] || 0) + 1; });
+    });
+    Object.keys(cnt).forEach(function (x) { if (cnt[x] > max) doubles.push({ dept_id: d.dept_id, name: d.name, date: x, count: cnt[x] }); });
+  });
+  return {
+    today: t, headcount: active.length, linked: active.filter(function (e) { return str(e.line_user_id); }).length,
+    away_today: awayToday,
+    pending: state.requests.filter(function (r) { return r.status === 'PENDING'; }).length,
+    escalated: state.requests.filter(function (r) { return r.status === 'ESCALATED'; }).length,
+    for_super_admin: state.requests.filter(function (r) { return open.indexOf(r.status) !== -1 && r.approver_emp_id === 'SUPER_ADMIN'; }).length,
+    cancel_requests: state.requests.filter(function (r) { return r.status === 'CANCEL_REQUESTED'; }).length,
+    missing_cert: missingCert, double_absences: doubles.sort(function (a, b) { return a.date < b.date ? -1 : 1; }),
+    data_mode: state.settings.data_mode
+  };
+}
+
+function reportBalances_(actor) {
+  var state = loadState();
+  return state.employees.filter(function (e) { return e.status === 'ACTIVE'; }).map(function (e) {
+    var dept = findDept_(state, e.dept_id), out = { emp_id: e.emp_id, name: empName(e), dept_name: dept ? dept.name : e.dept_id };
+    balancesNow(state, e).forEach(function (b) {
+      out.leave_year_start = b.leave_year_start; out.leave_year_end = b.leave_year_end;
+      out[b.type_id + '_granted'] = b.granted; out[b.type_id + '_used'] = b.used; out[b.type_id + '_pending'] = b.pending; out[b.type_id + '_available'] = b.available;
+    });
+    return out;
+  });
+}
+
+/**
+ * Monthly payroll summary for 'yyyy-MM': approved leave days in the month per employee.
+ * Unpaid = UNPAID type + sick days beyond the paid sick quota in that leave year.
+ */
+function reportPayroll_(actor, d) {
+  var state = loadState(), month = str(d.month) || state.today.slice(0, 7);
+  var from = month + '-01', to = month + '-' + pad2(daysInMonth(+month.slice(0, 4), +month.slice(5, 7)));
+  var sickQuota = Number((findType_(state, 'SICK') || {}).annual_quota || 30);
+  return state.employees.map(function (e) {
+    var dept = findDept_(state, e.dept_id), row = { emp_id: e.emp_id, name: empName(e), dept_name: dept ? dept.name : e.dept_id, by_type: {}, paid_days: 0, unpaid_days: 0 };
+    var sickUsedByYear = {};
+    state.requests.filter(function (r) { return str(r.emp_id) === str(e.emp_id) && TAKEN_REQ.indexOf(r.status) !== -1; })
+      .sort(function (a, b) { return a.start_date < b.start_date ? -1 : 1; })
+      .forEach(function (r) {
+        reqDates_(state, r).forEach(function (x) {
+          var unpaid = false;
+          if (r.type_id === 'SICK') {
+            var y = leaveYearStart(e.hire_date, x);
+            sickUsedByYear[y] = (sickUsedByYear[y] || 0) + 1;
+            unpaid = sickUsedByYear[y] > sickQuota;
+          }
+          if (r.type_id === 'UNPAID') unpaid = true;
+          if (x < from || x > to) return;
+          row.by_type[r.type_id] = (row.by_type[r.type_id] || 0) + 1;
+          if (unpaid) row.unpaid_days++; else row.paid_days++;
+        });
+      });
+    return row;
+  }).filter(function (r) { return r.paid_days || r.unpaid_days; });
+}
+
+function reportStats_(actor, d) {
+  var state = loadState(), to = toIso(d.to) || state.today, from = toIso(d.from) || addDays(to, -365);
+  var byMonth = {}, byType = {}, byDept = {}, sickByWeekday = [0, 0, 0, 0, 0, 0, 0], decide = {};
+  state.requests.forEach(function (r) {
+    if (TAKEN_REQ.indexOf(r.status) !== -1) {
+      reqDates_(state, r).forEach(function (x) {
+        if (x < from || x > to) return;
+        byMonth[x.slice(0, 7)] = (byMonth[x.slice(0, 7)] || 0) + 1;
+        byType[r.type_id] = (byType[r.type_id] || 0) + 1;
+        byDept[r.dept_id] = (byDept[r.dept_id] || 0) + 1;
+        if (r.type_id === 'SICK') sickByWeekday[isoWeekday(x) - 1]++;
+      });
+    }
+    if (r.decided_at && r.created_at && r.decided_by && r.decided_by !== 'IMPORT' && r.decided_by !== 'SYSTEM' && r.created_at.slice(0, 10) >= from) {
+      var h = (new Date(r.decided_at + '+07:00') - new Date(r.created_at + '+07:00')) / 3600000;
+      if (h >= 0) { var k = r.decided_by; decide[k] = decide[k] || { n: 0, hours: 0 }; decide[k].n++; decide[k].hours += h; }
+    }
+  });
+  var months = [], m = from.slice(0, 7);
+  while (m <= to.slice(0, 7) && months.length < 24) { months.push({ month: m, days: byMonth[m] || 0 }); var p = isoParts(m + '-01'); m = (p.m === 12 ? (p.y + 1) + '-01' : p.y + '-' + pad2(p.m + 1)); }
+  return {
+    from: from, to: to, months: months,
+    by_type: Object.keys(byType).map(function (k) { var t = findType_(state, k); return { type_id: k, name: t ? t.name_th : k, days: byType[k] }; }).sort(function (a, b) { return b.days - a.days; }),
+    by_dept: Object.keys(byDept).map(function (k) { var x = findDept_(state, k); return { dept_id: k, name: x ? x.name : k, days: byDept[k] }; }).sort(function (a, b) { return b.days - a.days; }),
+    sick_by_weekday: sickByWeekday,
+    approval_speed: Object.keys(decide).map(function (k) {
+      var e = findEmp_(state, k); return { approver: e ? empName(e) : k, decisions: decide[k].n, avg_hours: Math.round(decide[k].hours / decide[k].n * 10) / 10 };
+    }).sort(function (a, b) { return b.avg_hours - a.avg_hours; }),
+    auto_rejected: state.requests.filter(function (r) { return r.status === 'AUTO_REJECTED' && r.created_at.slice(0, 10) >= from; }).length,
+    escalations: readAll(SHEETS.AUDIT).filter(function (a) { return a.action === 'REQUEST_ESCALATED' && str(a.at).slice(0, 10) >= from; }).length
+  };
+}
+
 /* Preview mode sample data (fictional). Add ?as=E-001 to the URL to view as the head, ?as=NEW to see first-time linking. */
 (function () {
   Object.keys(SCHEMA).forEach(function (n) { __sheets[n] = [SCHEMA[n].slice()]; });
@@ -1517,6 +1891,11 @@ function morningJob() {
   appendObjects('Employees', [e('E-001', 'สมชาย', 'ใจดี', 'ชาย', addDays(t, -2200), true), e('E-002', 'วีระ', 'ทองดี', 'ระ', addDays(t, -800), true),
     e('E-003', 'ประยุทธ', 'ศรีสุข', 'ยุทธ', addDays(t, -1500), true), e('E-004', 'อนันต์', 'มีสุข', 'นันต์', addDays(t, -120), true)]);
   ensureGrants_();
+  appendObjects('AdminUsers', ['super_admin|SUPER_ADMIN|ผู้ดูแลสูงสุด', 'owner|OWNER|เจ้าของกิจการ'].map(function (x) {
+    var p = x.split('|');
+    return { username: p[0], full_name: p[2], role: p[1], password_hash: hashPassword('demo-pass-123', 'salt'), salt: 'salt',
+      must_change_password: false, active: true, failed_logins: 0, locked_until: '' };
+  }));
   var now = nowStamp();
   function req(id, emp, type, s, en, status, extra) {
     var r = { req_id: id, emp_id: emp, dept_id: 'D01', type_id: type, start_date: s, end_date: en,
@@ -1535,9 +1914,10 @@ function morningJob() {
 })();
 
 window.MockApi = {
-  call: function (action, data) {
+  call: function (action, data, opts) {
     var id = __as === 'NEW' ? 'mock-NEW' : 'mock-' + __as;
-    var out = JSON.parse(doPost({ postData: { contents: JSON.stringify({ action: action, idToken: id, data: data }) } }).s);
+    var body = opts && 'session' in opts ? { action: action, session: opts.session, data: data } : { action: action, idToken: id, data: data };
+    var out = JSON.parse(doPost({ postData: { contents: JSON.stringify(body) } }).s);
     return new Promise(function (res, rej) {
       setTimeout(function () { if (out.ok) res(out.data); else { var e = new Error(out.error.msg); e.code = out.error.code; rej(e); } }, 120);
     });

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>ระบบลา · ผู้ดูแล</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body class="admin">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand" id="brand">ระบบลา · ผู้ดูแล</span>
+      <span class="who" id="who"></span>
+    </div>
+  </header>
+  <div class="shell">
+    <nav class="side" id="side" hidden></nav>
+    <main id="app" class="app" aria-live="polite"><div class="splash"><div class="spinner"></div><p>กำลังเปิด…</p></div></main>
+  </div>
+  <div id="sheet-root"></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="config.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>

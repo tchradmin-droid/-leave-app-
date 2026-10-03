@@ -59,7 +59,9 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (j.ok) return j.data;
-        if (j.error && j.error.code === 'AUTH') { liff.logout(); liff.login({ redirectUri: location.href }); }
+        if (j.error && j.error.code === 'AUTH' && !sessionStorage.getItem('relogin')) {
+          sessionStorage.setItem('relogin', '1'); liff.logout(); liff.login({ redirectUri: location.href });
+        }
         var err = new Error(j.error ? j.error.msg : 'เกิดข้อผิดพลาด'); err.code = j.error && j.error.code; throw err;
       }, function () { var e = new Error('เชื่อมต่อระบบไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'); e.code = 'NETWORK'; throw e; });
   }
@@ -80,7 +82,16 @@
   }
 
   function start() {
+    var q0 = new URLSearchParams(location.search);
+    if (q0.get('page') === 'linkadmin' && q0.get('code')) {
+      document.getElementById('tabbar').hidden = true;
+      api('linkAdminByCode', { code: q0.get('code') }).then(function (r) {
+        $app.innerHTML = '<h1>ผูก LINE เรียบร้อย</h1><div class="notice ok">บัญชีผู้ดูแล <b>' + esc(r.username) + '</b> จะได้รับแจ้งเตือนทาง LINE นี้</div><p class="muted">ปิดหน้านี้ได้เลย</p>';
+      }).catch(function (e) { $app.innerHTML = '<h1>ผูก LINE ไม่สำเร็จ</h1>' + errorBox([e]); });
+      return;
+    }
     api('me').then(function (me) {
+      try { sessionStorage.removeItem('relogin'); } catch (e) { }
       S.me = me;
       if (me.settings && me.settings.company_name) document.getElementById('brand').textContent = 'ระบบลา · ' + me.settings.company_name;
       if (!me.linked) { viewLink(); return; }
