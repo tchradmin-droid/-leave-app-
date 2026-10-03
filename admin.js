@@ -17,7 +17,7 @@
   var DOC = { NONE: 'ไม่ต้องมี', OPTIONAL: 'แนบได้ถ้ามี', REQUIRED: 'บังคับทุกครั้ง', REQUIRED_IF_MIN_DAYS: 'บังคับเมื่อลาตั้งแต่ N วัน' };
   function parts(iso) { var p = iso.split('-'); return { y: +p[0], m: +p[1], d: +p[2] }; }
   function weekday(iso) { var w = new Date(iso + 'T00:00:00Z').getUTCDay(); return w === 0 ? 7 : w; }
-  function thaiDate(iso, dow) { if (!iso) return ''; var p = parts(iso); return (dow ? DOW[weekday(iso) - 1] + ' ' : '') + p.d + ' ' + MONTHS[p.m - 1] + ' ' + String(p.y + 543).slice(2); }
+  function thaiDate(iso, dow) { if (!iso) return ''; return (dow ? DOW[weekday(iso) - 1] + ' ' : '') + dmy(iso); }
   function range(a, b) { return a === b ? thaiDate(a, true) : thaiDate(a, true) + ' – ' + thaiDate(b, true); }
   function stamp(s) { return s ? thaiDate(String(s).slice(0, 10)) + ' ' + String(s).slice(11, 16) : ''; }
   function canEdit() { return A.user && (A.user.role === 'ADMIN' || A.user.role === 'SUPER_ADMIN'); }
@@ -46,12 +46,74 @@
     return o;
   }
   function downloadCsv(name, header, rows) {
-    var q = function (v) { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var q = function (v) { v = v == null ? '' : String(v).replace(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?(?::\d{2})?$/, function (_, y, m, d, t) { return d + '/' + m + '/' + y + (t ? ' ' + t : ''); }); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
     var csv = '﻿' + [header].concat(rows).map(function (r) { return r.map(q).join(','); }).join('\r\n');
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     a.download = name; document.body.appendChild(a); a.click(); a.remove();
   }
+
+  /* ------------------------------------------------------------ dd/mm/yyyy date fields
+     Every <input type="date"> is turned into a text box that shows and accepts dd/mm/yyyy (C.E.; a
+     Buddhist year such as 2569 is converted), plus a calendar button. The original input stays in the
+     form as a hidden field holding yyyy-mm-dd, so form code and the server are unchanged. */
+  function dmy(iso) { var m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[3] + '/' + m[2] + '/' + m[1] : ''; }
+  function parseDmy(s) {
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(s || '').trim());
+    if (!m) return '';
+    var d = +m[1], mo = +m[2], y = +m[3];
+    if (y >= 2400) y -= 543;
+    var t = new Date(Date.UTC(y, mo - 1, d));
+    if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) return '';
+    return t.toISOString().slice(0, 10);
+  }
+  var CAL_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>';
+  function enhanceDate(inp) {
+    if (inp.getAttribute('data-dmy')) return;
+    inp.setAttribute('data-dmy', '1');
+    var wrap = document.createElement('span'); wrap.className = 'dmy';
+    var txt = document.createElement('input');
+    txt.type = 'text'; txt.inputMode = 'numeric'; txt.placeholder = 'วว/ดด/ปปปป'; txt.maxLength = 10; txt.autocomplete = 'off';
+    txt.required = inp.required; txt.disabled = inp.disabled; txt.readOnly = inp.readOnly;
+    if (inp.title) { txt.title = inp.title; txt.setAttribute('aria-label', inp.title); }
+    var btn = document.createElement('span'); btn.className = 'dmy-btn'; btn.innerHTML = CAL_ICON;
+    var pick = document.createElement('input');
+    pick.type = 'date'; pick.className = 'dmy-pick'; pick.tabIndex = -1; pick.setAttribute('aria-label', 'เลือกวันที่จากปฏิทิน');
+    pick.disabled = inp.disabled || inp.readOnly;
+    inp.parentNode.insertBefore(wrap, inp);
+    wrap.appendChild(txt); wrap.appendChild(btn); btn.appendChild(pick); wrap.appendChild(inp);
+    inp.required = false; inp.type = 'hidden';
+    txt.value = dmy(inp.value); pick.value = inp.value;
+    function setIso(iso) {
+      if (inp.value === iso) return;
+      inp.value = iso; pick.value = iso;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    txt.addEventListener('input', function () {
+      var raw = txt.value, out, tok = raw.split('/');
+      // the user typed their own separators (e.g. 5/3/2533) -> keep them; otherwise mask digits as dd/mm/yyyy
+      if (tok.slice(0, -1).some(function (t) { return t.replace(/\D/g, '').length === 1; })) out = raw.replace(/[^\d\/]/g, '').slice(0, 10);
+      else {
+        var dg = raw.replace(/\D/g, '').slice(0, 8);
+        out = dg.slice(0, 2) + (dg.length > 2 ? '/' + dg.slice(2, 4) : '') + (dg.length > 4 ? '/' + dg.slice(4) : '');
+      }
+      if (out !== raw) txt.value = out;
+      var iso = parseDmy(out);
+      txt.setCustomValidity(out && !iso && out.length >= 8 ? 'วันที่ไม่ถูกต้อง ใช้รูปแบบ วว/ดด/ปปปป' : '');
+      setIso(iso);
+    });
+    txt.addEventListener('blur', function () {
+      var iso = parseDmy(txt.value);
+      if (iso) txt.value = dmy(iso);
+      txt.setCustomValidity(txt.value && !iso ? 'วันที่ไม่ถูกต้อง ใช้รูปแบบ วว/ดด/ปปปป' : '');
+    });
+    pick.addEventListener('click', function () { try { if (pick.showPicker) pick.showPicker(); } catch (e) { } });
+    pick.addEventListener('change', function () { txt.value = dmy(pick.value); txt.setCustomValidity(''); setIso(pick.value); });
+    if (inp.form) inp.form.addEventListener('reset', function () { setTimeout(function () { txt.value = ''; txt.setCustomValidity(''); inp.value = ''; pick.value = ''; }, 0); });
+  }
+  function enhanceDates(root) { Array.prototype.forEach.call((root || document).querySelectorAll('input[type=date]:not(.dmy-pick)'), enhanceDate); }
+  new MutationObserver(function () { enhanceDates(document); }).observe(document.documentElement, { childList: true, subtree: true });
 
   /* ------------------------------------------------------------ API */
   function api(action, data) {
@@ -273,8 +335,9 @@
     var preview = function () {
       var d = formData(f); if (!d.emp_id || !d.start_date || !d.end_date) return;
       api('previewOnBehalf', { emp_id: d.emp_id, type_id: d.type_id, start_date: d.start_date, end_date: d.end_date, reason: d.reason || '-' }).then(function (r) {
-        document.getElementById('pv').innerHTML = r.ok ? '<div class="notice ok">' + r.dates.length + ' วันทำงาน</div>' + errorBox(r.warnings, 'warn') : errorBox(r.errors);
-      }).catch(function (e) { document.getElementById('pv').innerHTML = errorBox([e]); });
+        var pv = document.getElementById('pv'); if (!pv) return;
+        pv.innerHTML = r.ok ? '<div class="notice ok">' + r.dates.length + ' วันทำงาน</div>' + errorBox(r.warnings, 'warn') : errorBox(r.errors);
+      }).catch(function (e) { var pv = document.getElementById('pv'); if (pv) pv.innerHTML = errorBox([e]); });
     };
     f.addEventListener('change', preview);
     f.addEventListener('submit', function (e) {
@@ -373,13 +436,25 @@
     }).catch(function (e) { $app.innerHTML = errorBox([e]); });
   }
 
+  /** Preview of the next ID (the server assigns the real one when saving): highest number + 1, same prefix and padding. */
+  function nextEmpId(list) {
+    var best = null;
+    (list || []).forEach(function (e) {
+      var m = /^(.*?)(\d+)$/.exec(String(e.emp_id || '').trim());
+      if (m && (!best || +m[2] > best.n)) best = { prefix: m[1], n: +m[2], width: m[2].length };
+    });
+    if (!best) return 'E-001';
+    var s = String(best.n + 1); while (s.length < best.width) s = '0' + s;
+    return best.prefix + s;
+  }
+
   function viewEmployee(id) {
     var isNew = id === 'new';
-    var load = isNew ? Promise.resolve([null, null]) : Promise.all([api('employees'), api('employeeBalances', { emp_id: id })]);
+    var load = isNew ? Promise.all([api('employees'), null]) : Promise.all([api('employees'), api('employeeBalances', { emp_id: id })]);
     loading();
     load.then(function (res) {
       var b = res[1];
-      var e = isNew ? { status: 'ACTIVE', title: 'นาย' } : b && b.employee;
+      var e = isNew ? { status: 'ACTIVE', title: 'นาย', emp_id: nextEmpId(res[0]) } : b && b.employee;
       if (e && !isNew) { var li = res[0].filter(function (x) { return x.emp_id === id; })[0]; e.name = li ? li.name : b.name; }
       if (!e) { $app.innerHTML = errorBox([{ msg: 'ไม่พบพนักงาน' }]); return; }
       var dis = canEdit() ? '' : ' disabled';
@@ -388,7 +463,7 @@
       };
       $app.innerHTML = '<a class="linkbtn" href="#emps">‹ พนักงาน</a><div class="page-head"><h1>' + (isNew ? 'เพิ่มพนักงาน' : esc(e.name)) + '</h1></div>' +
         '<div class="grid2"><form class="panel" id="ef"><h2 style="margin-top:0">ข้อมูลพนักงาน</h2><div class="form-grid">' +
-        f('emp_id', 'รหัสพนักงาน', 'text', e.emp_id, isNew ? ' required' : ' readonly') +
+        f('emp_id', isNew ? 'รหัสพนักงาน (ระบบกำหนดให้อัตโนมัติ)' : 'รหัสพนักงาน', 'text', e.emp_id, ' readonly') +
         '<label class="field"><span>คำนำหน้า</span><select name="title"' + dis + '>' + ['นาย', 'นาง', 'นางสาว'].map(function (t) { return '<option' + (e.title === t ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select></label>' +
         f('first_name', 'ชื่อ', 'text', e.first_name) + f('last_name', 'นามสกุล', 'text', e.last_name) + f('nickname', 'ชื่อเล่น', 'text', e.nickname) +
         '<label class="field"><span>แผนก</span><select name="dept_id"' + dis + '>' + A.setup.departments.map(function (d) { return '<option value="' + esc(d.dept_id) + '"' + (d.dept_id === e.dept_id ? ' selected' : '') + '>' + esc(d.name) + '</option>'; }).join('') + '</select></label>' +
@@ -415,7 +490,8 @@
       if (canEdit()) ef.addEventListener('submit', function (ev) {
         ev.preventDefault();
         var d = formData(ef);
-        api('saveEmployee', d).then(function () { toast('บันทึกแล้ว'); api('setup').then(function (s) { A.setup = s; }); location.hash = '#emp/' + encodeURIComponent(d.emp_id); if (!isNew) viewEmployee(d.emp_id); })
+        if (isNew) d.is_new = true;
+        api('saveEmployee', d).then(function (r) { var nid = (r && r.emp_id) || d.emp_id; toast(isNew ? 'เพิ่มพนักงานแล้ว รหัส ' + nid : 'บันทึกแล้ว'); api('setup').then(function (s) { A.setup = s; }); location.hash = '#emp/' + encodeURIComponent(nid); if (!isNew) viewEmployee(nid); })
           .catch(function (x) { document.getElementById('err').innerHTML = errorBox([x]); });
       });
       var ul = document.getElementById('unlink');

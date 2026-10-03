@@ -20,14 +20,75 @@
   function weekday(iso) { var w = new Date(iso + 'T00:00:00Z').getUTCDay(); return w === 0 ? 7 : w; }
   function thaiDate(iso, withDow) {
     if (!iso) return '';
-    var p = parts(iso);
-    return (withDow ? DOW[weekday(iso) - 1] + ' ' : '') + p.d + ' ' + MONTHS[p.m - 1] + ' ' + String(p.y + 543).slice(2);
+    return (withDow ? DOW[weekday(iso) - 1] + ' ' : '') + dmy(iso);
   }
   function range(a, b) { return a === b ? thaiDate(a, true) : thaiDate(a, true) + ' – ' + thaiDate(b, true); }
   function today() { return (S.me && S.me.today) || new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10); }
   function workDays() { return String((S.me && S.me.settings && S.me.settings.work_days) || '1,2,3,4,5').split(',').map(Number); }
   function isOff(iso) { return workDays().indexOf(weekday(iso)) === -1 || (S.me && S.me.holidays.indexOf(iso) !== -1); }
   function typeOf(id) { return (S.me.types || []).filter(function (t) { return t.type_id === id; })[0]; }
+
+  /* ------------------------------------------------------------ dd/mm/yyyy date fields
+     Every <input type="date"> is turned into a text box that shows and accepts dd/mm/yyyy (C.E.; a
+     Buddhist year such as 2569 is converted), plus a calendar button. The original input stays in the
+     form as a hidden field holding yyyy-mm-dd, so form code and the server are unchanged. */
+  function dmy(iso) { var m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[3] + '/' + m[2] + '/' + m[1] : ''; }
+  function parseDmy(s) {
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(s || '').trim());
+    if (!m) return '';
+    var d = +m[1], mo = +m[2], y = +m[3];
+    if (y >= 2400) y -= 543;
+    var t = new Date(Date.UTC(y, mo - 1, d));
+    if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) return '';
+    return t.toISOString().slice(0, 10);
+  }
+  var CAL_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>';
+  function enhanceDate(inp) {
+    if (inp.getAttribute('data-dmy')) return;
+    inp.setAttribute('data-dmy', '1');
+    var wrap = document.createElement('span'); wrap.className = 'dmy';
+    var txt = document.createElement('input');
+    txt.type = 'text'; txt.inputMode = 'numeric'; txt.placeholder = 'วว/ดด/ปปปป'; txt.maxLength = 10; txt.autocomplete = 'off';
+    txt.required = inp.required; txt.disabled = inp.disabled; txt.readOnly = inp.readOnly;
+    if (inp.title) { txt.title = inp.title; txt.setAttribute('aria-label', inp.title); }
+    var btn = document.createElement('span'); btn.className = 'dmy-btn'; btn.innerHTML = CAL_ICON;
+    var pick = document.createElement('input');
+    pick.type = 'date'; pick.className = 'dmy-pick'; pick.tabIndex = -1; pick.setAttribute('aria-label', 'เลือกวันที่จากปฏิทิน');
+    pick.disabled = inp.disabled || inp.readOnly;
+    inp.parentNode.insertBefore(wrap, inp);
+    wrap.appendChild(txt); wrap.appendChild(btn); btn.appendChild(pick); wrap.appendChild(inp);
+    inp.required = false; inp.type = 'hidden';
+    txt.value = dmy(inp.value); pick.value = inp.value;
+    function setIso(iso) {
+      if (inp.value === iso) return;
+      inp.value = iso; pick.value = iso;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    txt.addEventListener('input', function () {
+      var raw = txt.value, out, tok = raw.split('/');
+      // the user typed their own separators (e.g. 5/3/2533) -> keep them; otherwise mask digits as dd/mm/yyyy
+      if (tok.slice(0, -1).some(function (t) { return t.replace(/\D/g, '').length === 1; })) out = raw.replace(/[^\d\/]/g, '').slice(0, 10);
+      else {
+        var dg = raw.replace(/\D/g, '').slice(0, 8);
+        out = dg.slice(0, 2) + (dg.length > 2 ? '/' + dg.slice(2, 4) : '') + (dg.length > 4 ? '/' + dg.slice(4) : '');
+      }
+      if (out !== raw) txt.value = out;
+      var iso = parseDmy(out);
+      txt.setCustomValidity(out && !iso && out.length >= 8 ? 'วันที่ไม่ถูกต้อง ใช้รูปแบบ วว/ดด/ปปปป' : '');
+      setIso(iso);
+    });
+    txt.addEventListener('blur', function () {
+      var iso = parseDmy(txt.value);
+      if (iso) txt.value = dmy(iso);
+      txt.setCustomValidity(txt.value && !iso ? 'วันที่ไม่ถูกต้อง ใช้รูปแบบ วว/ดด/ปปปป' : '');
+    });
+    pick.addEventListener('click', function () { try { if (pick.showPicker) pick.showPicker(); } catch (e) { } });
+    pick.addEventListener('change', function () { txt.value = dmy(pick.value); txt.setCustomValidity(''); setIso(pick.value); });
+    if (inp.form) inp.form.addEventListener('reset', function () { setTimeout(function () { txt.value = ''; txt.setCustomValidity(''); inp.value = ''; pick.value = ''; }, 0); });
+  }
+  function enhanceDates(root) { Array.prototype.forEach.call((root || document).querySelectorAll('input[type=date]:not(.dmy-pick)'), enhanceDate); }
+  new MutationObserver(function () { enhanceDates(document); }).observe(document.documentElement, { childList: true, subtree: true });
 
   function toast(msg) {
     var t = document.getElementById('toast');
@@ -403,7 +464,7 @@
     api('deptCalendar', { days: 7 }).then(function (depts) {
       var d = depts[0];
       $app.innerHTML = '<h1>แผนก' + esc(d.name) + '</h1><p class="lead">ใครลาบ้างใน 7 วันทำงานข้างหน้า</p><div class="days">' + d.days.map(function (day) {
-        return '<div class="dayrow' + (day.slot_full ? ' full' : '') + '"><div class="d1">' + DOW[day.weekday - 1] + ' ' + parts(day.date).d + '<small>' + MONTHS[parts(day.date).m - 1] + '</small></div>' +
+        return '<div class="dayrow' + (day.slot_full ? ' full' : '') + '"><div class="d1">' + DOW[day.weekday - 1] + ' ' + dmy(day.date).slice(0, 5) + '<small>' + parts(day.date).y + '</small></div>' +
           '<div>' + (day.away.length ? day.away.map(function (a) { return '<span class="person" style="--c:' + esc(a.color) + '">' + esc(a.name) + ' <span class="muted">' + esc(a.type) + '</span></span>'; }).join('') : '<span class="muted">ไม่มีคนลา</span>') + '</div>' +
           '<div class="avail"><b>' + day.available + '/' + day.headcount + '</b>อยู่ทำงาน</div></div>';
       }).join('') + '</div>';

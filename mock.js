@@ -147,6 +147,12 @@ var STATUS = {
  */
 
 /** Any Sheets cell value (Date or text) -> 'yyyy-MM-dd', or '' if empty/invalid. */
+/** '2026-10-05' -> '05/10/2026' (display format used everywhere the user sees a date) */
+function dmy(iso) {
+  var m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[3] + '/' + m[2] + '/' + m[1] : String(iso || '');
+}
+
 function toIso(v) {
   if (v === null || v === undefined || v === '') return '';
   if (Object.prototype.toString.call(v) === '[object Date]') {
@@ -520,7 +526,7 @@ function validateRequest(state, emp, input, opts) {
   // 4. notice / filing window
   var notice = Number(type.notice_days || 0);
   if (notice > 0) {
-    if (daysBetween(state.today, s) < notice) fail('NOTICE', type.name_th + 'ต้องแจ้งล่วงหน้าอย่างน้อย ' + notice + ' วัน (เริ่มได้ตั้งแต่ ' + addDays(state.today, notice) + ')');
+    if (daysBetween(state.today, s) < notice) fail('NOTICE', type.name_th + 'ต้องแจ้งล่วงหน้าอย่างน้อย ' + notice + ' วัน (เริ่มได้ตั้งแต่ ' + dmy(addDays(state.today, notice)) + ')');
   } else {
     var win = toNum(type.filing_window_days);
     if (win !== null && e < state.today) {
@@ -549,7 +555,7 @@ function validateRequest(state, emp, input, opts) {
   if (toBool(type.blocked_by_slot)) {
     var taken = takenDeptDates(state, emp.dept_id, s, e);
     var clash = dates.filter(function (d) { return taken.full.indexOf(d) !== -1; });
-    if (clash.length) fail('SLOT_TAKEN', 'แผนกมีผู้ลาแล้วในวันที่ ' + clash.join(', '), { dates: clash });
+    if (clash.length) fail('SLOT_TAKEN', 'แผนกมีผู้ลาแล้วในวันที่ ' + clash.map(dmy).join(', '), { dates: clash });
   }
 
   // 8. documents
@@ -586,7 +592,7 @@ function validateApproval(state, req, attachmentCount) {
   var taken = takenDeptDates(state, req.dept_id, req.start_date, req.end_date, req.req_id);
   var clash = dates.filter(function (d) { return taken.full.indexOf(d) !== -1; });
   if (clash.length) {
-    if (toBool(type.blocked_by_slot)) errors.push({ code: 'SLOT_TAKEN', msg: 'แผนกมีผู้ลาที่อนุมัติแล้วในวันที่ ' + clash.join(', ') });
+    if (toBool(type.blocked_by_slot)) errors.push({ code: 'SLOT_TAKEN', msg: 'แผนกมีผู้ลาที่อนุมัติแล้วในวันที่ ' + clash.map(dmy).join(', ') });
     else out.doubleAbsence = clash;
   }
   out.ok = errors.length === 0;
@@ -1166,11 +1172,9 @@ function notifyDoubleAbsence_(state, req, dates) {
 }
 
 var THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
-/** '2026-11-12' -> '12 พ.ย. 69' (Buddhist year, short) */
+/** '2026-11-12' -> '12/11/2026' (dd/mm/yyyy) */
 function thaiDate(iso) {
-  if (!iso) return '';
-  var p = isoParts(iso);
-  return p.d + ' ' + THAI_MONTHS[p.m - 1] + ' ' + String(p.y + 543).slice(2);
+  return iso ? dmy(iso) : '';
 }
 
 /** Menu: check the LINE settings and send a test message to an employee who has linked LINE. */
@@ -1556,10 +1560,29 @@ function pick_(src, keys) { var o = {}; keys.forEach(function (k) { if (src[k] !
 
 var EMP_EDITABLE = ['title', 'first_name', 'last_name', 'nickname', 'dept_id', 'position', 'hire_date', 'birth_date', 'phone', 'email', 'status', 'resign_date'];
 
+/**
+ * Next employee ID = the highest-numbered existing ID + 1, keeping its prefix and zero padding
+ * (E-009 -> E-010, 00123 -> 00124). Resigned employees count, so an ID is never reused.
+ */
+function nextEmpId_(employees) {
+  var best = null;
+  employees.forEach(function (e) {
+    var m = /^(.*?)(\d+)$/.exec(str(e.emp_id));
+    if (!m) return;
+    var n = parseInt(m[2], 10);
+    if (!best || n > best.n) best = { prefix: m[1], n: n, width: m[2].length };
+  });
+  if (!best) return 'E-001';
+  var s = String(best.n + 1);
+  while (s.length < best.width) s = '0' + s;
+  return best.prefix + s;
+}
+
 function saveEmployee(actor, d) {
   requireAdmin_(actor);
   var res = withLock(function () {
-    var state = loadState(), id = str(d.emp_id);
+    var state = loadState(), isNew = d.is_new === true || d.is_new === 'true';
+    var id = isNew ? nextEmpId_(state.employees) : str(d.emp_id);
     if (!id) fail_('BAD_VALUE', 'กรุณาใส่รหัสพนักงาน');
     var patch = pick_(d, EMP_EDITABLE);
     ['hire_date', 'birth_date', 'resign_date'].forEach(function (k) { if (k in patch) patch[k] = toIso(patch[k]); });
@@ -1583,7 +1606,7 @@ function saveEmployee(actor, d) {
       appendObjects(SHEETS.EMPLOYEES, [patch]);
       audit(actor.user.username, actor.user.role, 'EMPLOYEE_CREATE', 'Employee', id, null, patch);
     }
-    return { ok: true };
+    return { ok: true, emp_id: id };
   });
   ensureGrants_(); // new hire or changed hire date: make sure this leave year's quota exists
   return res;
