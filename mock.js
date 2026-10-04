@@ -3,7 +3,7 @@
 /* Preview mode: runs the real Apps Script backend in the browser on sample data. Built into mock.js. */
 var __sheets = {}, __files = {}, __cache = {}, __pushes = [];
 var __params = new URLSearchParams(location.search);
-var __as = __params.get('as') || 'E-002';
+var __as = __params.get('as') || 'E-001';
 function __fmt(d, tz, f) {
   var p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
     .formatToParts(d).reduce(function (a, x) { a[x.type] = x.value; return a; }, {});
@@ -74,7 +74,8 @@ var SHEETS = {
 var SCHEMA = {
   Employees: ['emp_id', 'title', 'first_name', 'last_name', 'nickname', 'dept_id', 'position',
     'hire_date', 'birth_date', 'phone', 'email', 'status', 'resign_date',
-    'line_user_id', 'line_linked_at', 'created_at', 'updated_at'],
+    'line_user_id', 'line_linked_at', 'created_at', 'updated_at',
+    'link_code_hash', 'link_code_expires', 'link_code_tries'],
   Departments: ['dept_id', 'name', 'head_emp_id', 'max_concurrent', 'active'],
   AdminUsers: ['username', 'full_name', 'role', 'emp_id', 'email', 'password_hash', 'salt',
     'must_change_password', 'active', 'failed_logins', 'locked_until', 'line_user_id', 'created_at'],
@@ -127,6 +128,8 @@ var SEED_SETTINGS = [
   ['cert_reminder_max', '3', 'เตือนแนบใบรับรองแพทย์สูงสุดกี่ครั้ง'],
   ['attachment_retention_months', '24', 'ลบไฟล์แนบหลังกี่เดือน'],
   ['session_minutes', '30', 'อายุ session ของผู้ใช้ username'],
+  ['link_code_days', '7', 'รหัสผูก LINE ของหัวหน้างานใช้ได้กี่วัน (ใช้ได้ครั้งเดียว)'],
+  ['admin_url', '', 'ที่อยู่หน้าผู้ดูแล (บันทึกอัตโนมัติเมื่อเข้าระบบ) ใช้เป็นลิงก์ในการ์ด LINE ของผู้ดูแล'],
   ['company_name', '', 'ชื่อบริษัทที่แสดงในแอป'],
   ['attachments_folder_id', '', 'สร้างอัตโนมัติตอนตั้งค่า'],
   ['backups_folder_id', '', 'สร้างอัตโนมัติตอนตั้งค่า'],
@@ -456,17 +459,20 @@ function takenDeptDates(state, deptId, fromIso, toIso, excludeReqId) {
   return { full: full, who: who };
 }
 
-/** Who approves a request from this employee: the head, or SUPER_ADMIN if the requester is the head or the head is away. */
-function approverFor(state, emp) {
-  var dept = findDept_(state, emp.dept_id);
-  if (!dept || !dept.head_emp_id || str(dept.head_emp_id) === str(emp.emp_id)) return 'SUPER_ADMIN';
-  var head = findEmp_(state, dept.head_emp_id);
-  if (!head || head.status !== 'ACTIVE') return 'SUPER_ADMIN';
-  var headAway = state.requests.some(function (r) {
-    return str(r.emp_id) === str(head.emp_id) && TAKEN_REQ.indexOf(r.status) !== -1 &&
-      r.start_date <= state.today && r.end_date >= state.today;
-  });
-  return headAway ? 'SUPER_ADMIN' : str(head.emp_id);
+/** Every request is approved by Admin / Super-admin on the admin page (supervisors only file them). */
+function approverFor(state, emp) { return 'ADMIN'; }
+
+/** Supervisor = the head of a department. Returns the dept_ids this employee supervises (active departments only). */
+function supervisedDepts_(state, empId) {
+  return state.departments.filter(function (d) { return !(d.active === false || str(d.active).toUpperCase() === 'FALSE') && str(d.head_emp_id) === str(empId); })
+    .map(function (d) { return str(d.dept_id); });
+}
+function isSupervisor_(state, empId) { return supervisedDepts_(state, empId).length > 0; }
+/** The supervisor(s) to notify about a request: the head of the request's department. */
+function supervisorsOf_(state, deptId) {
+  var d = findDept_(state, deptId);
+  var head = d && str(d.head_emp_id) ? findEmp_(state, d.head_emp_id) : null;
+  return head && head.status === 'ACTIVE' ? [head] : [];
 }
 
 /**
@@ -482,7 +488,6 @@ function validateRequest(state, emp, input, opts) {
 
   // 1. employee
   if (!emp || emp.status !== 'ACTIVE') { fail('EMP_INACTIVE', 'ไม่พบพนักงานหรือพนักงานไม่ได้ทำงานอยู่'); return res; }
-  if (!opts.bySuperAdmin && !emp.line_user_id) { fail('NOT_LINKED', 'ยังไม่ได้ผูกบัญชี LINE'); return res; }
 
   // 2. dates
   var s = toIso(input.start_date), e = toIso(input.end_date);
@@ -514,7 +519,7 @@ function validateRequest(state, emp, input, opts) {
   // 3. self-service period, eligibility, max per request
   var minMonths = Number(state.settings.self_service_after_months || 12);
   if (fullMonthsBetween(emp.hire_date, state.today) < minMonths) {
-    fail('SELF_SERVICE_LOCKED', 'ทำงานยังไม่ครบ ' + minMonths + ' เดือน กรุณาแจ้งผู้ดูแลระบบ (Super-admin) เพื่อบันทึกการลาแทน');
+    fail('SELF_SERVICE_LOCKED', 'พนักงานทำงานยังไม่ครบ ' + minMonths + ' เดือน กรุณาส่งใบลาให้ฝ่ายบุคคลบันทึกแทน');
     return res;
   }
   if (fullMonthsBetween(emp.hire_date, s) < Number(type.eligible_after_months || 0)) {
@@ -531,12 +536,12 @@ function validateRequest(state, emp, input, opts) {
     var win = toNum(type.filing_window_days);
     if (win !== null && e < state.today) {
       var late = workingDates(addDays(e, 1), state.today, workDaysOf_(state), state.holidays).length;
-      if (late > win) fail('FILING_LATE', 'ต้องยื่น' + type.name_th + 'ภายใน ' + win + ' วันทำงานหลังกลับมาทำงาน กรุณาแจ้งผู้ดูแลระบบ');
+      if (late > win) fail('FILING_LATE', 'ต้องบันทึก' + type.name_th + 'ภายใน ' + win + ' วันทำงานหลังกลับมาทำงาน เกินกำหนดแล้ว กรุณาส่งใบลาให้ฝ่ายบุคคล');
     }
   }
 
   // 5. own overlap
-  if (overlap.length) fail('OVERLAP', 'ช่วงนี้มีใบลาของคุณอยู่แล้ว');
+  if (overlap.length) fail('OVERLAP', 'พนักงานคนนี้มีใบลาในช่วงนี้อยู่แล้ว');
 
   // 6. balance per leave year
   if (toNum(type.annual_quota) !== null) {
@@ -562,7 +567,7 @@ function validateRequest(state, emp, input, opts) {
   var att = Number(input.attachment_count || 0);
   if (type.doc_rule === 'REQUIRED' && att === 0) fail('DOC_REQUIRED', type.name_th + 'ต้องแนบเอกสารทุกครั้ง');
   if (res.needsDoc && att === 0 && type.doc_rule === 'REQUIRED_IF_MIN_DAYS')
-    warnings.push('ลาตั้งแต่ ' + needsDocDays + ' วันขึ้นไปต้องแนบใบรับรองแพทย์ แนบภายหลังได้ แต่หัวหน้าจะอนุมัติไม่ได้จนกว่าจะแนบ');
+    warnings.push('ลาตั้งแต่ ' + needsDocDays + ' วันขึ้นไปต้องแนบใบรับรองแพทย์ แนบภายหลังได้ แต่ฝ่ายบุคคลจะอนุมัติไม่ได้จนกว่าจะแนบ');
   if (!str(input.reason)) fail('NO_REASON', 'กรุณาระบุเหตุผล');
 
   res.ok = errors.length === 0;
@@ -580,7 +585,7 @@ function validateApproval(state, req, attachmentCount) {
   var dates = reqDates_(state, req);
   var needsDoc = type.doc_rule === 'REQUIRED' ||
     (type.doc_rule === 'REQUIRED_IF_MIN_DAYS' && toNum(type.doc_min_days) !== null && dates.length >= Number(type.doc_min_days));
-  if (needsDoc && !attachmentCount) errors.push({ code: 'DOC_MISSING', msg: 'ยังไม่ได้แนบเอกสาร — อนุมัติไม่ได้จนกว่าพนักงานจะแนบ' });
+  if (needsDoc && !attachmentCount) errors.push({ code: 'DOC_MISSING', msg: 'ยังไม่ได้แนบเอกสาร — อนุมัติไม่ได้จนกว่าหัวหน้างานจะแนบ' });
 
   if (toNum(type.annual_quota) !== null) {
     var by = splitByLeaveYear(state, emp, dates);
@@ -638,7 +643,9 @@ function deptCalendar(state, deptId, n) {
 /**
  * ระบบลา — Service.gs
  * Every action that changes data: load state, check with Rules.gs, write, log, notify.
- * actor = { kind:'staff', emp } | { kind:'admin', user:{ username, role, full_name } }
+ * actor = { kind:'staff', emp } (a supervisor using the LINE app) | { kind:'admin', user:{ username, role, full_name } }
+ * Flow: the employee hands a paper form to their supervisor → the supervisor files it in the LINE app →
+ * Admin / Super-admin approve or reject on the admin page. Employees themselves never use the system.
  */
 
 function AppError(code, msg) { this.code = code; this.message = msg; }
@@ -658,7 +665,20 @@ function loadState() {
 function isAdminRole_(actor) { return actor.kind === 'admin' && (actor.user.role === 'ADMIN' || actor.user.role === 'SUPER_ADMIN'); }
 function isSuperAdmin_(actor) { return actor.kind === 'admin' && actor.user.role === 'SUPER_ADMIN'; }
 function actorId_(actor) { return actor.kind === 'staff' ? actor.emp.emp_id : actor.user.username; }
-function actorRole_(actor) { return actor.kind === 'staff' ? 'EMPLOYEE' : actor.user.role; }
+function actorRole_(actor) { return actor.kind === 'staff' ? 'SUPERVISOR' : actor.user.role; }
+
+/** The employee a supervisor is filing for (must be in a department they supervise). Defaults to the supervisor. */
+function teamMember_(state, actor, empId) {
+  var emp = findEmp_(state, str(empId) || actor.emp.emp_id);
+  if (!emp) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
+  if (supervisedDepts_(state, actor.emp.emp_id).indexOf(str(emp.dept_id)) === -1 && str(emp.emp_id) !== str(actor.emp.emp_id))
+    fail_('FORBIDDEN', 'บันทึกได้เฉพาะพนักงานในแผนกที่คุณดูแล');
+  return emp;
+}
+/** Can this supervisor act on this request? (it belongs to a department they supervise, or it is their own) */
+function supervises_(state, actor, req) {
+  return actor.kind === 'staff' && (supervisedDepts_(state, actor.emp.emp_id).indexOf(str(req.dept_id)) !== -1 || str(req.emp_id) === str(actor.emp.emp_id));
+}
 
 function attachmentsOf_(state, reqId) { return state.attachments.filter(function (a) { return str(a.req_id) === str(reqId); }); }
 
@@ -704,7 +724,7 @@ function claimAttachments_(state, actor, reqId, attIds) {
 
 function previewLeave(actor, input) {
   var state = loadState();
-  var emp = actor.kind === 'staff' ? findEmp_(state, actor.emp.emp_id) : findEmp_(state, input.emp_id);
+  var emp = actor.kind === 'staff' ? teamMember_(state, actor, input.emp_id) : findEmp_(state, input.emp_id);
   return validateRequest(state, emp, input, { bySuperAdmin: actor.kind === 'admin' && isAdminRole_(actor) });
 }
 
@@ -713,7 +733,8 @@ function submitLeave(actor, input, attIds) {
     var state = loadState();
     var onBehalf = actor.kind === 'admin';
     if (onBehalf && !isAdminRole_(actor)) fail_('FORBIDDEN', 'ไม่มีสิทธิ์บันทึกการลาแทน');
-    var emp = onBehalf ? findEmp_(state, input.emp_id) : findEmp_(state, actor.emp.emp_id);
+    var emp = onBehalf ? findEmp_(state, input.emp_id) : teamMember_(state, actor, input.emp_id);
+    if (!emp) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
     var validAtt = (attIds || []).filter(function (id) {
       var a = state.attachments.filter(function (x) { return str(x.att_id) === str(id); })[0];
       return a && !str(a.req_id) && str(a.uploaded_by) === str(actorId_(actor));
@@ -731,7 +752,7 @@ function submitLeave(actor, input, attIds) {
       approver_emp_id: onBehalf ? 'SUPER_ADMIN' : approverFor(state, emp),
       decided_by: onBehalf ? actor.user.username : '', decided_at: onBehalf ? now : '',
       decision_note: onBehalf ? 'บันทึกแทนโดย ' + actor.user.username : '',
-      filed_by: onBehalf ? 'ADMIN:' + actor.user.username : 'SELF',
+      filed_by: onBehalf ? 'ADMIN:' + actor.user.username : 'SUP:' + actor.emp.emp_id,
       leave_year_start: leaveYearStart(emp.hire_date, toIso(input.start_date)), created_at: now, updated_at: now
     };
     appendObjects(SHEETS.REQUESTS, [req]);
@@ -741,12 +762,12 @@ function submitLeave(actor, input, attIds) {
 
     if (onBehalf) {
       writeTakes_(state, emp, req, actor.user.username);
-      notifyEmployee_(state, req, 'FILED_ON_BEHALF');
+      notifySupervisor_(state, req, 'FILED_ON_BEHALF');
       var dbl = takenDeptDates(state, req.dept_id, req.start_date, req.end_date, req.req_id).full
         .filter(function (d) { return v.dates.indexOf(d) !== -1; });
       if (dbl.length && toBool(findType_(state, req.type_id).takes_slot)) notifyDoubleAbsence_(state, req, dbl);
     } else {
-      notifyApprover_(state, req, 'NEW_REQUEST');
+      notifyAdmins_(state, req, 'NEW_REQUEST');
     }
     return { ok: true, req: req, warnings: v.warnings };
   });
@@ -754,13 +775,8 @@ function submitLeave(actor, input, attIds) {
 
 /* ------------------------------------------------------------------ decide */
 
-function canDecide_(state, actor, req) {
-  if (isAdminRole_(actor)) return true;
-  if (actor.kind !== 'staff' || str(req.emp_id) === str(actor.emp.emp_id)) return false;
-  if (str(req.approver_emp_id) === str(actor.emp.emp_id)) return true;
-  var dept = findDept_(state, req.dept_id);
-  return req.status === 'ESCALATED' && dept && str(dept.head_emp_id) === str(actor.emp.emp_id) && req.approver_emp_id !== 'SUPER_ADMIN';
-}
+/** Only Admin / Super-admin approve or reject. */
+function canDecide_(state, actor, req) { return isAdminRole_(actor); }
 
 function approveLeave(actor, reqId, note) {
   return withLock(function () {
@@ -772,11 +788,11 @@ function approveLeave(actor, reqId, note) {
     var emp = findEmp_(state, req.emp_id);
     setReq_(req, { status: 'APPROVED', decided_by: actorId_(actor), decided_at: nowStamp(), decision_note: str(note) }, actor);
     writeTakes_(state, emp, req, actorId_(actor));
-    notifyEmployee_(state, req, 'APPROVED');
+    notifySupervisor_(state, req, 'APPROVED');
     check.autoReject.forEach(function (id) {
       var other = findReq_(state, id);
       setReq_(other, { status: 'AUTO_REJECTED', decided_by: 'SYSTEM', decided_at: nowStamp(), decision_note: 'มีผู้ลาในแผนกแล้ว' }, actor);
-      notifyEmployee_(state, other, 'AUTO_REJECTED');
+      notifySupervisor_(state, other, 'AUTO_REJECTED');
     });
     if (check.doubleAbsence.length) notifyDoubleAbsence_(state, req, check.doubleAbsence);
     return { ok: true, req: req, autoRejected: check.autoReject };
@@ -791,7 +807,7 @@ function rejectLeave(actor, reqId, reason) {
     if (!canDecide_(state, actor, req)) fail_('FORBIDDEN', 'คุณไม่มีสิทธิ์พิจารณาใบลานี้');
     if (PENDING_REQ.indexOf(req.status) === -1) fail_('BAD_STATUS', 'ใบลานี้ไม่ได้รออนุมัติแล้ว');
     setReq_(req, { status: 'REJECTED', decided_by: actorId_(actor), decided_at: nowStamp(), decision_note: str(reason) }, actor);
-    notifyEmployee_(state, req, 'REJECTED');
+    notifySupervisor_(state, req, 'REJECTED');
     return { ok: true, req: req };
   });
 }
@@ -803,8 +819,8 @@ function cancelLeave(actor, reqId, reason) {
     var state = loadState(), req = findReq_(state, reqId);
     if (!req) fail_('NOT_FOUND', 'ไม่พบใบลา');
     var admin = isAdminRole_(actor);
-    var owner = actor.kind === 'staff' && str(req.emp_id) === str(actor.emp.emp_id);
-    if (!admin && !owner) fail_('FORBIDDEN', 'ยกเลิกได้เฉพาะใบลาของตัวเอง');
+    var owner = supervises_(state, actor, req);
+    if (!admin && !owner) fail_('FORBIDDEN', 'ยกเลิกได้เฉพาะใบลาของพนักงานในแผนกที่คุณดูแล');
 
     if (admin) {
       if (ACTIVE_REQ.indexOf(req.status) === -1) fail_('BAD_STATUS', 'ใบลานี้ไม่อยู่ในสถานะที่ยกเลิกได้');
@@ -812,17 +828,18 @@ function cancelLeave(actor, reqId, reason) {
       var wasTaken = TAKEN_REQ.indexOf(req.status) !== -1;
       setReq_(req, { status: 'CANCELLED', decided_by: actorId_(actor), decided_at: nowStamp(), decision_note: 'ยกเลิกโดยผู้ดูแล: ' + reason }, actor);
       if (wasTaken) reverseTakes_(state, req, actorId_(actor), reason);
-      notifyEmployee_(state, req, 'CANCELLED_BY_ADMIN');
+      notifySupervisor_(state, req, 'CANCELLED_BY_ADMIN');
       return { ok: true, req: req };
     }
     if (PENDING_REQ.indexOf(req.status) !== -1) {
-      setReq_(req, { status: 'CANCELLED', decision_note: 'พนักงานยกเลิกเอง' }, actor);
+      setReq_(req, { status: 'CANCELLED', decision_note: 'หัวหน้างานยกเลิก' + (str(reason) ? ': ' + str(reason) : '') }, actor);
       return { ok: true, req: req };
     }
     if (req.status === 'APPROVED') {
-      if (req.start_date <= state.today) fail_('STARTED', 'ใบลาเริ่มแล้ว กรุณาแจ้งผู้ดูแลระบบเพื่อแก้ไข');
+      if (req.start_date <= state.today) fail_('STARTED', 'ใบลาเริ่มแล้ว กรุณาแจ้งฝ่ายบุคคลเพื่อแก้ไข');
+      if (!str(reason)) fail_('NO_REASON', 'กรุณาระบุเหตุผลที่ขอยกเลิก');
       setReq_(req, { status: 'CANCEL_REQUESTED', decision_note: str(reason) }, actor);
-      notifyApprover_(state, req, 'CANCEL_REQUESTED');
+      notifyAdmins_(state, req, 'CANCEL_REQUESTED');
       return { ok: true, req: req };
     }
     fail_('BAD_STATUS', 'ใบลานี้ยกเลิกไม่ได้');
@@ -834,16 +851,14 @@ function decideCancel(actor, reqId, approve) {
     var state = loadState(), req = findReq_(state, reqId);
     if (!req) fail_('NOT_FOUND', 'ไม่พบใบลา');
     if (req.status !== 'CANCEL_REQUESTED') fail_('BAD_STATUS', 'ไม่มีคำขอยกเลิกค้างอยู่');
-    var allowed = isAdminRole_(actor) || (actor.kind === 'staff' && str(actor.emp.emp_id) !== str(req.emp_id) &&
-      (str(req.approver_emp_id) === str(actor.emp.emp_id) || str((findDept_(state, req.dept_id) || {}).head_emp_id) === str(actor.emp.emp_id)));
-    if (!allowed) fail_('FORBIDDEN', 'คุณไม่มีสิทธิ์พิจารณาคำขอนี้');
+    if (!isAdminRole_(actor)) fail_('FORBIDDEN', 'คุณไม่มีสิทธิ์พิจารณาคำขอนี้');
     if (approve) {
       setReq_(req, { status: 'CANCELLED', decided_by: actorId_(actor), decided_at: nowStamp() }, actor);
       reverseTakes_(state, req, actorId_(actor), 'อนุมัติให้ยกเลิก');
-      notifyEmployee_(state, req, 'CANCEL_APPROVED');
+      notifySupervisor_(state, req, 'CANCEL_APPROVED');
     } else {
       setReq_(req, { status: 'APPROVED' }, actor);
-      notifyEmployee_(state, req, 'CANCEL_REFUSED');
+      notifySupervisor_(state, req, 'CANCEL_REFUSED');
     }
     return { ok: true, req: req };
   });
@@ -864,8 +879,6 @@ function adjustBalance(actor, empId, typeId, delta, reason) {
       kind: 'ADJUST', req_id: '', by: actor.user.username, at: nowStamp(), note: reason };
     appendObjects(SHEETS.LEDGER, [row]);
     audit(actor.user.username, actor.user.role, 'BALANCE_ADJUST', 'Employee', emp.emp_id, null, row);
-    pushToEmp_(state, emp, 'ADMIN_CHANGE', 'มีการปรับยอดวันลา', [
-      ['ประเภท', type.name_th], ['ปรับ', (delta > 0 ? '+' : '') + delta + ' วัน'], ['เหตุผล', reason]], '');
     return { ok: true };
   });
 }
@@ -888,18 +901,16 @@ function addAttachments(actor, reqId, attIds) {
   return withLock(function () {
     var state = loadState(), req = findReq_(state, reqId);
     if (!req) fail_('NOT_FOUND', 'ไม่พบใบลา');
-    if (!(actor.kind === 'staff' && str(req.emp_id) === str(actor.emp.emp_id)) && !isAdminRole_(actor)) fail_('FORBIDDEN', 'ไม่มีสิทธิ์');
+    if (!supervises_(state, actor, req) && !isAdminRole_(actor)) fail_('FORBIDDEN', 'ไม่มีสิทธิ์');
     var n = claimAttachments_(state, actor, reqId, attIds);
-    if (n && PENDING_REQ.indexOf(req.status) !== -1) notifyApprover_(state, req, 'DOC_ADDED');
+    if (n && PENDING_REQ.indexOf(req.status) !== -1 && actor.kind === 'staff') notifyAdmins_(state, req, 'DOC_ADDED');
     return { ok: true, added: n };
   });
 }
 
 function canSeeRequest_(state, actor, req) {
   if (actor.kind === 'admin') return true; // admin, super-admin, owner
-  if (str(req.emp_id) === str(actor.emp.emp_id)) return true;
-  var dept = findDept_(state, req.dept_id);
-  return str(req.approver_emp_id) === str(actor.emp.emp_id) || (dept && str(dept.head_emp_id) === str(actor.emp.emp_id));
+  return supervises_(state, actor, req);
 }
 
 function getAttachment(actor, attId) {
@@ -923,6 +934,8 @@ function requestDetail(actor, reqId) {
   var out = { req: req, employee: { emp_id: emp.emp_id, name: empName(emp), dept_id: emp.dept_id, position: emp.position },
     type: { type_id: type.type_id, name_th: type.name_th, color: type.color }, attachments: atts,
     can_decide: PENDING_REQ.indexOf(req.status) !== -1 && canDecide_(state, actor, req) };
+  var fb = str(req.filed_by), byEmp = /^SUP:/.test(fb) ? findEmp_(state, fb.slice(4)) : null;
+  out.filed_by_text = byEmp ? 'หัวหน้างาน ' + empName(byEmp) : /^ADMIN:/.test(fb) ? 'ฝ่ายบุคคล (' + fb.slice(6) + ')' : fb === 'IMPORT' ? 'นำเข้าข้อมูล' : fb === 'SELF' ? 'พนักงาน (ระบบเดิม)' : fb;
   if (out.can_decide) {
     var chk = validateApproval(state, req, atts.length);
     out.check = { ok: chk.ok, errors: chk.errors, will_auto_reject: chk.autoReject.length, double_absence: chk.doubleAbsence };
@@ -976,24 +989,40 @@ function staffActor(idToken) {
   return { kind: 'staff', lineUserId: who.sub, lineName: who.name, emp: emp };
 }
 
-/** First-time link: employee ID + birth date must match the master record. 5 wrong tries per hour. */
-function linkLine(idToken, empId, birthDate) {
+/**
+ * First-time link for a supervisor: employee ID + the one-time code Admin created for them (Admin.gs createEmployeeLinkCode).
+ * The code is stored hashed, expires after link_code_days, works once, and is voided after 5 wrong tries.
+ * A LINE account is also limited to 5 wrong tries per hour.
+ */
+function linkLine(idToken, empId, code) {
   var who = verifyLineIdToken(idToken);
   var cache = CacheService.getScriptCache(), failKey = 'linkfail:' + who.sub;
   var fails = Number(cache.get(failKey) || 0);
-  if (fails >= 5) fail_('LOCKED', 'ลองผิดหลายครั้ง กรุณารอ 1 ชั่วโมง หรือติดต่อผู้ดูแลระบบ');
+  if (fails >= 5) fail_('LOCKED', 'ลองผิดหลายครั้ง กรุณารอ 1 ชั่วโมง หรือติดต่อฝ่ายบุคคล');
+  code = str(code).replace(/\s/g, '');
   return withLock(function () {
     var emps = readAll(SHEETS.EMPLOYEES);
     var already = emps.filter(function (e) { return str(e.line_user_id) === who.sub; })[0];
-    if (already && str(already.emp_id) !== str(empId)) fail_('ALREADY_LINKED', 'บัญชี LINE นี้ผูกกับรหัส ' + already.emp_id + ' แล้ว กรุณาติดต่อผู้ดูแลระบบ');
+    if (already && str(already.emp_id).toUpperCase() !== str(empId).toUpperCase()) fail_('ALREADY_LINKED', 'บัญชี LINE นี้ผูกกับรหัส ' + already.emp_id + ' แล้ว กรุณาติดต่อฝ่ายบุคคล');
     var emp = emps.filter(function (e) { return str(e.emp_id).toUpperCase() === str(empId).toUpperCase(); })[0];
-    if (!emp || emp.status !== 'ACTIVE' || emp.birth_date !== toIso(birthDate)) {
+    var wrong = function (msg) {
       cache.put(failKey, String(fails + 1), 3600);
-      fail_('NO_MATCH', 'รหัสพนักงานหรือวันเกิดไม่ตรงกับข้อมูลบริษัท (เหลือ ' + (4 - fails) + ' ครั้ง)');
-    }
-    if (str(emp.line_user_id) && str(emp.line_user_id) !== who.sub) fail_('TAKEN', 'รหัสนี้ผูกกับ LINE อื่นแล้ว กรุณาติดต่อผู้ดูแลระบบ');
-    updateWhere(SHEETS.EMPLOYEES, 'emp_id', emp.emp_id, { line_user_id: who.sub, line_linked_at: nowStamp(), updated_at: nowStamp() });
-    audit(emp.emp_id, 'EMPLOYEE', 'LINE_LINKED', 'Employee', emp.emp_id, null, { line_name: who.name });
+      if (emp && str(emp.link_code_hash)) {
+        var tries = Number(emp.link_code_tries || 0) + 1;
+        updateWhere(SHEETS.EMPLOYEES, 'emp_id', emp.emp_id, tries >= 5 ? { link_code_hash: '', link_code_expires: '', link_code_tries: '' } : { link_code_tries: tries });
+        if (tries >= 5) { audit(emp.emp_id, 'SUPERVISOR', 'LINK_CODE_VOIDED', 'Employee', emp.emp_id, null, { reason: '5 wrong tries' }); fail_('CODE_VOIDED', 'ใส่รหัสผิดหลายครั้ง รหัสนี้ถูกยกเลิกแล้ว กรุณาขอรหัสใหม่จากฝ่ายบุคคล'); }
+      }
+      fail_('NO_MATCH', msg + ' (เหลือ ' + Math.max(0, 4 - fails) + ' ครั้ง)');
+    };
+    if (!emp || emp.status !== 'ACTIVE') wrong('ไม่พบรหัสพนักงานนี้');
+    if (!str(emp.link_code_hash)) fail_('NO_CODE', 'ยังไม่มีรหัสผูก LINE สำหรับรหัสพนักงานนี้ กรุณาขอรหัสจากฝ่ายบุคคล');
+    if (str(emp.link_code_expires) < nowStamp()) fail_('CODE_EXPIRED', 'รหัสผูก LINE หมดอายุแล้ว กรุณาขอรหัสใหม่จากฝ่ายบุคคล');
+    if (hashPassword(code, 'link|' + emp.emp_id) !== str(emp.link_code_hash)) wrong('รหัสพนักงานหรือรหัสผูก LINE ไม่ถูกต้อง');
+    if (!isSupervisor_({ departments: readAll(SHEETS.DEPARTMENTS) }, emp.emp_id)) fail_('NOT_SUPERVISOR', 'รหัสพนักงานนี้ไม่ได้เป็นหัวหน้างาน จึงใช้แอปไม่ได้ กรุณาติดต่อฝ่ายบุคคล');
+    if (str(emp.line_user_id) && str(emp.line_user_id) !== who.sub) fail_('TAKEN', 'รหัสนี้ผูกกับ LINE อื่นแล้ว กรุณาให้ฝ่ายบุคคลยกเลิกการผูกเดิมก่อน');
+    updateWhere(SHEETS.EMPLOYEES, 'emp_id', emp.emp_id, { line_user_id: who.sub, line_linked_at: nowStamp(), updated_at: nowStamp(),
+      link_code_hash: '', link_code_expires: '', link_code_tries: '' });
+    audit(emp.emp_id, 'SUPERVISOR', 'LINE_LINKED', 'Employee', emp.emp_id, null, { line_name: who.name, by: 'link code' });
     cache.remove(failKey);
     return { ok: true, emp_id: emp.emp_id };
   });
@@ -1124,10 +1153,17 @@ function pushToEmp_(state, emp, template, title, rows, reqId) {
 }
 
 /** Admin-side recipients (username accounts with a linked LINE). roles: array of role names. */
-function pushToAdmins_(roles, template, title, rows, reqId) {
+/** Admin page link for a request (the admin page records its own address at login), else the LINE app. */
+function adminUrl_(reqId) {
+  var base = str(getSettings().admin_url);
+  if (!base) return liffUrl_(reqId);
+  return base + (reqId ? '#req/' + encodeURIComponent(reqId) : '');
+}
+
+function pushToAdmins_(roles, template, title, rows, reqId, url) {
   readAll(SHEETS.ADMIN_USERS).forEach(function (u) {
     if (!toBool(u.active) || roles.indexOf(u.role) === -1 || !str(u.line_user_id)) return;
-    linePush_(str(u.line_user_id), flexCard_(title, TYPE_COLORS[template] || '#1F4E78', rows, 'เปิดในแอป', liffUrl_(reqId)),
+    linePush_(str(u.line_user_id), flexCard_(title, TYPE_COLORS[template] || '#1F4E78', rows, 'เปิดดู', url || adminUrl_(reqId)),
       { to: 'admin:' + u.username, template: template, req_id: reqId });
   });
 }
@@ -1140,34 +1176,44 @@ function reqRows_(state, req, extra) {
   return rows.concat(extra || []);
 }
 
-function notifyApprover_(state, req, template) {
-  var titles = { NEW_REQUEST: 'มีใบลารออนุมัติ', CANCEL_REQUESTED: 'ขอยกเลิกใบลาที่อนุมัติแล้ว', DOC_ADDED: 'พนักงานแนบเอกสารเพิ่มแล้ว', ESCALATED: 'ใบลาค้างอนุมัติเกินกำหนด' };
+/**
+ * To Admin and Super-admin (they approve everything). ESCALATED (waiting too long) goes to Super-admin only.
+ * The card opens the request on the admin page.
+ */
+function notifyAdmins_(state, req, template) {
+  var titles = { NEW_REQUEST: 'มีใบลารออนุมัติ', CANCEL_REQUESTED: 'หัวหน้างานขอยกเลิกใบลาที่อนุมัติแล้ว',
+    DOC_ADDED: 'หัวหน้างานแนบเอกสารเพิ่มแล้ว', ESCALATED: 'ใบลาค้างอนุมัติเกินกำหนด' };
   var extra = [['เหตุผล', req.reason]];
   if (template === 'CANCEL_REQUESTED') extra = [['เหตุผลยกเลิก', req.decision_note]];
-  var rows = reqRows_(state, req, extra);
-  if (req.approver_emp_id === 'SUPER_ADMIN' || template === 'ESCALATED') pushToAdmins_(['SUPER_ADMIN'], template, titles[template], rows, req.req_id);
-  if (req.approver_emp_id !== 'SUPER_ADMIN') pushToEmp_(state, findEmp_(state, req.approver_emp_id), template, titles[template], rows, req.req_id);
+  var by = /^SUP:/.test(str(req.filed_by)) ? findEmp_(state, str(req.filed_by).slice(4)) : null;
+  if (by) extra.push(['บันทึกโดย', empName(by)]);
+  var roles = template === 'ESCALATED' ? ['SUPER_ADMIN'] : ['ADMIN', 'SUPER_ADMIN'];
+  pushToAdmins_(roles, template, titles[template], reqRows_(state, req, extra), req.req_id, adminUrl_(req.req_id));
 }
 
-function notifyEmployee_(state, req, template) {
+/** To the supervisor (department head) of the request's department — employees themselves get nothing. */
+function notifySupervisor_(state, req, template) {
   var map = {
     APPROVED: ['อนุมัติใบลาแล้ว', 'APPROVED'], REJECTED: ['ไม่อนุมัติใบลา', 'REJECTED'],
     AUTO_REJECTED: ['ใบลาไม่ผ่าน: แผนกมีผู้ลาแล้ว', 'AUTO_REJECTED'],
-    CANCELLED_BY_ADMIN: ['ใบลาถูกยกเลิกโดยผู้ดูแลระบบ', 'ADMIN_CHANGE'], FILED_ON_BEHALF: ['ผู้ดูแลระบบบันทึกการลาให้คุณแล้ว', 'ADMIN_CHANGE'],
+    CANCELLED_BY_ADMIN: ['ฝ่ายบุคคลยกเลิกใบลา', 'ADMIN_CHANGE'], FILED_ON_BEHALF: ['ฝ่ายบุคคลบันทึกการลาให้พนักงานในแผนก', 'ADMIN_CHANGE'],
     CANCEL_APPROVED: ['ยกเลิกใบลาเรียบร้อย คืนวันลาแล้ว', 'APPROVED'], CANCEL_REFUSED: ['ไม่อนุมัติการยกเลิก ใบลายังมีผล', 'REJECTED'],
-    CERT_REMINDER: ['กรุณาแนบใบรับรองแพทย์', 'CERT_REMINDER']
+    CERT_REMINDER: ['กรุณาแนบใบรับรองแพทย์ของพนักงาน', 'CERT_REMINDER']
   };
   var m = map[template];
   var extra = [];
   if (req.decision_note) extra.push(['หมายเหตุ', req.decision_note]);
-  if (template === 'AUTO_REJECTED') extra.push(['แนะนำ', 'เลือกวันอื่นที่ยังว่างในแอป']);
-  pushToEmp_(state, findEmp_(state, req.emp_id), m[1], m[0], reqRows_(state, req, extra), req.req_id);
+  if (template === 'AUTO_REJECTED') extra.push(['แนะนำ', 'แจ้งพนักงานให้เลือกวันอื่น แล้วบันทึกใหม่']);
+  if (template === 'CERT_REMINDER') extra.push(['ทำอย่างไร', 'เปิดใบลาในแอป แล้วกด "แนบเอกสาร"']);
+  supervisorsOf_(state, req.dept_id).forEach(function (sup) {
+    pushToEmp_(state, sup, m[1], m[0], reqRows_(state, req, extra), req.req_id);
+  });
 }
 
 function notifyDoubleAbsence_(state, req, dates) {
   var rows = reqRows_(state, req, [['วันที่ซ้อน', dates.map(thaiDate).join(', ')]]);
   var dept = findDept_(state, req.dept_id);
-  if (dept && str(dept.head_emp_id) !== str(req.emp_id)) pushToEmp_(state, findEmp_(state, dept.head_emp_id), 'DOUBLE_ABSENCE', 'แผนกมีคนลาซ้อนกัน', rows, req.req_id);
+  if (dept && str(dept.head_emp_id)) pushToEmp_(state, findEmp_(state, dept.head_emp_id), 'DOUBLE_ABSENCE', 'แผนกมีคนลาซ้อนกัน', rows, req.req_id);
   pushToAdmins_(['ADMIN', 'SUPER_ADMIN'], 'DOUBLE_ABSENCE', 'แผนกมีคนลาซ้อนกัน', rows, req.req_id);
 }
 
@@ -1216,10 +1262,14 @@ function doPost(e) {
     if (route.auth === 'staff' || route.auth === 'line') {
       actor = staffActor(body.idToken);
       if (route.auth === 'staff' && !actor.emp) fail_('NOT_LINKED', 'ยังไม่ได้ผูกบัญชี LINE กับรหัสพนักงาน');
+      if (route.auth === 'staff' && !isSupervisor_({ departments: readAll(SHEETS.DEPARTMENTS) }, actor.emp.emp_id))
+        fail_('NOT_SUPERVISOR', 'แอปนี้สำหรับหัวหน้างานเท่านั้น ถ้าคุณเป็นหัวหน้างาน กรุณาติดต่อฝ่ายบุคคล');
     } else if (route.auth === 'admin' || route.auth === 'any') {
       if (route.auth === 'any' && body.idToken && !body.session) {
         actor = staffActor(body.idToken);
         if (!actor.emp) fail_('NOT_LINKED', 'ยังไม่ได้ผูกบัญชี LINE');
+        if (!isSupervisor_({ departments: readAll(SHEETS.DEPARTMENTS) }, actor.emp.emp_id))
+          fail_('NOT_SUPERVISOR', 'แอปนี้สำหรับหัวหน้างานเท่านั้น');
       } else {
         actor = adminActor(body.session);
         if (actor.user.must_change && body.action !== 'changePassword' && body.action !== 'logout')
@@ -1245,28 +1295,35 @@ var ADMINS = ['ADMIN', 'SUPER_ADMIN'];
 var ALL_USERS = ['ADMIN', 'SUPER_ADMIN', 'OWNER'];
 
 var ROUTES = {
-  // ---- staff (LINE)
+  // ---- supervisors (LINE app): file leave for their department; they do not approve
   me: { auth: 'line', fn: apiMe_ },
-  link: { auth: 'line', fn: function (a, d, b) { return linkLine(b.idToken, d.emp_id, d.birth_date); } },
+  link: { auth: 'line', fn: function (a, d, b) { return linkLine(b.idToken, d.emp_id, d.code); } },
   preview: { auth: 'staff', fn: function (a, d) { return previewLeave(a, d); } },
   takenDates: { auth: 'staff', fn: apiTakenDates_ },
   submit: { auth: 'staff', fn: function (a, d) { return submitLeave(a, d.input || {}, d.att_ids); } },
-  myRequests: { auth: 'staff', fn: apiMyRequests_ },
+  teamRequests: { auth: 'staff', fn: apiTeamRequests_ },
+  myRequests: { auth: 'staff', fn: apiTeamRequests_ },
   deptCalendar: { auth: 'any', fn: apiDeptCalendar_ },
-  inbox: { auth: 'any', fn: apiInbox_ },
+  inbox: { auth: 'admin', roles: ALL_USERS, fn: apiInbox_ },
 
   // ---- shared (staff or username users)
   upload: { auth: 'any', fn: function (a, d) { return uploadAttachment(a, d.name, d.mime, d.base64); } },
   addAttachments: { auth: 'any', fn: function (a, d) { return addAttachments(a, d.req_id, d.att_ids); } },
   attachment: { auth: 'any', fn: function (a, d) { return getAttachment(a, d.att_id); } },
   request: { auth: 'any', fn: function (a, d) { return requestDetail(a, d.req_id); } },
-  approve: { auth: 'any', roles: ADMINS, fn: function (a, d) { return approveLeave(a, d.req_id, d.note); } },
-  reject: { auth: 'any', roles: ADMINS, fn: function (a, d) { return rejectLeave(a, d.req_id, d.reason); } },
+  approve: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return approveLeave(a, d.req_id, d.note); } },
+  reject: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return rejectLeave(a, d.req_id, d.reason); } },
   cancel: { auth: 'any', roles: ADMINS, fn: function (a, d) { return cancelLeave(a, d.req_id, d.reason); } },
-  decideCancel: { auth: 'any', roles: ADMINS, fn: function (a, d) { return decideCancel(a, d.req_id, !!d.approve); } },
+  decideCancel: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return decideCancel(a, d.req_id, !!d.approve); } },
 
   // ---- username users
-  login: { auth: 'public', fn: function (a, d) { return adminLogin(d.username, d.password); } },
+  login: { auth: 'public', fn: function (a, d) {
+    var r = adminLogin(d.username, d.password);
+    // Remember the admin page's address so LINE cards for Admin/Super-admin open it directly.
+    var url = str(d.page_url).split('#')[0].split('?')[0];
+    if (/^https:\/\/[^\s]+\/admin\.html$/.test(url) && getSettings().admin_url !== url) setSetting('admin_url', url);
+    return r;
+  } },
   logout: { auth: 'admin', fn: function (a) { return adminLogout(a); } },
   changePassword: { auth: 'admin', fn: function (a, d) { return changePassword(a, d.old_password, d.new_password); } },
   linkAdminLine: { auth: 'admin', fn: function (a, d) { return linkAdminLine(a, d.idToken); } },
@@ -1283,6 +1340,8 @@ var ROUTES = {
   setup: { auth: 'admin', roles: ALL_USERS, fn: function (a) { return adminSetup_(a); } },
   saveEmployee: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveEmployee(a, d); } },
   unlinkLine: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return unlinkEmployeeLine(a, d.emp_id); } },
+  createLinkCode: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return createEmployeeLinkCode(a, d.emp_id); } },
+  cancelLinkCode: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return cancelEmployeeLinkCode(a, d.emp_id); } },
   saveDepartment: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveDepartment(a, d); } },
   saveHoliday: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return saveHoliday(a, d); } },
   deleteHoliday: { auth: 'admin', roles: ADMINS, fn: function (a, d) { return deleteHoliday(a, d.date); } },
@@ -1323,40 +1382,49 @@ function reqForClient_(state, r) {
 function apiMe_(actor) {
   if (!actor.emp) return { linked: false, line_name: actor.lineName, settings: publicSettings_(getSettings()) };
   var state = loadState(), emp = findEmp_(state, actor.emp.emp_id), dept = findDept_(state, emp.dept_id);
-  var isHead = state.departments.some(function (d) { return str(d.head_emp_id) === str(emp.emp_id); });
+  var deptIds = supervisedDepts_(state, emp.emp_id);
+  var base = { linked: true, today: state.today, settings: publicSettings_(state.settings),
+    employee: { emp_id: emp.emp_id, name: empName(emp), first_name: emp.first_name, dept_id: emp.dept_id, dept_name: dept ? dept.name : '', position: emp.position } };
+  base.is_supervisor = deptIds.length > 0;
+  if (!base.is_supervisor) return base;
   var minMonths = Number(state.settings.self_service_after_months || 12);
-  var inboxCount = !isHead ? 0 : state.requests.filter(function (r) {
-    return ['PENDING', 'ESCALATED', 'CANCEL_REQUESTED'].indexOf(r.status) !== -1 && str(r.approver_emp_id) === str(emp.emp_id);
-  }).length;
-  return {
-    linked: true, today: state.today,
-    employee: { emp_id: emp.emp_id, name: empName(emp), first_name: emp.first_name, dept_id: emp.dept_id,
-      dept_name: dept ? dept.name : '', position: emp.position, hire_date: emp.hire_date },
-    is_head: isHead, inbox_count: inboxCount,
-    self_service: fullMonthsBetween(emp.hire_date, state.today) >= minMonths, self_service_after_months: minMonths,
-    balances: balancesNow(state, emp),
-    types: state.types.filter(function (t) { return toBool(t.active); }).map(typeForClient_),
-    holidays: Object.keys(state.holidays).filter(function (d) { return d >= state.today; }).sort(),
-    settings: publicSettings_(state.settings)
-  };
+  // Everyone the supervisor can file for: their departments' active staff, plus themselves.
+  var team = state.employees.filter(function (e) {
+    return e.status === 'ACTIVE' && (deptIds.indexOf(str(e.dept_id)) !== -1 || str(e.emp_id) === str(emp.emp_id));
+  }).sort(function (a, b) { return str(a.emp_id) < str(b.emp_id) ? -1 : 1; }).map(function (e) {
+    var d = findDept_(state, e.dept_id);
+    return { emp_id: e.emp_id, name: empName(e), dept_id: e.dept_id, dept_name: d ? d.name : '', position: e.position,
+      self_service: fullMonthsBetween(e.hire_date, state.today) >= minMonths, balances: balancesNow(state, e) };
+  });
+  base.departments = deptIds.map(function (id) { var d = findDept_(state, id); return { dept_id: id, name: d ? d.name : id }; });
+  base.team = team;
+  base.self_service_after_months = minMonths;
+  base.pending_count = state.requests.filter(function (r) { return PENDING_REQ.indexOf(r.status) !== -1 && deptIds.indexOf(str(r.dept_id)) !== -1; }).length;
+  base.types = state.types.filter(function (t) { return toBool(t.active); }).map(typeForClient_);
+  base.holidays = Object.keys(state.holidays).filter(function (d) { return d >= state.today; }).sort();
+  return base;
 }
 
+/** Days the employee's department is already full (for greying out the calendar). */
 function apiTakenDates_(actor, d) {
-  var state = loadState();
+  var state = loadState(), emp = teamMember_(state, actor, d.emp_id);
   var from = toIso(d.from) || state.today, to = toIso(d.to) || addDays(from, 120);
-  return { full: takenDeptDates(state, actor.emp.dept_id, from, to).full };
+  return { full: takenDeptDates(state, emp.dept_id, from, to, d.exclude_req_id).full };
 }
 
-function apiMyRequests_(actor) {
-  var state = loadState();
-  return state.requests.filter(function (r) { return str(r.emp_id) === str(actor.emp.emp_id); })
+/** Requests of the departments this supervisor looks after (newest first). */
+function apiTeamRequests_(actor) {
+  var state = loadState(), ids = supervisedDepts_(state, actor.emp.emp_id);
+  return state.requests.filter(function (r) { return ids.indexOf(str(r.dept_id)) !== -1 || str(r.emp_id) === str(actor.emp.emp_id); })
     .sort(function (a, b) { return a.start_date < b.start_date ? 1 : -1; })
-    .slice(0, 100).map(function (r) { return reqForClient_(state, r); });
+    .slice(0, 200).map(function (r) { return reqForClient_(state, r); });
 }
 
 function apiDeptCalendar_(actor, d) {
   var state = loadState(), n = Math.min(Number(d.days || 7), 31);
-  if (actor.kind === 'staff') return [{ dept_id: actor.emp.dept_id, name: (findDept_(state, actor.emp.dept_id) || {}).name, days: deptCalendar(state, actor.emp.dept_id, n) }];
+  if (actor.kind === 'staff') return supervisedDepts_(state, actor.emp.emp_id).map(function (id) {
+    return { dept_id: id, name: (findDept_(state, id) || {}).name, days: deptCalendar(state, id, n) };
+  });
   return state.departments.filter(function (x) { return toBool(x.active); }).map(function (x) {
     return { dept_id: x.dept_id, name: x.name, days: deptCalendar(state, x.dept_id, n) };
   });
@@ -1366,14 +1434,15 @@ function apiInbox_(actor) {
   var state = loadState(), open = ['PENDING', 'ESCALATED', 'CANCEL_REQUESTED'];
   var list = state.requests.filter(function (r) {
     if (open.indexOf(r.status) === -1) return false;
-    if (actor.kind === 'staff') return str(r.approver_emp_id) === str(actor.emp.emp_id) && str(r.emp_id) !== str(actor.emp.emp_id);
     // Super-admin also holds Admin rights (for now), so both see every open request.
     return actor.user.role === 'SUPER_ADMIN' || actor.user.role === 'ADMIN';
   });
   return list.sort(function (a, b) { return a.created_at < b.created_at ? -1 : 1; }).map(function (r) {
     var o = reqForClient_(state, r);
     o.waiting_hours = Math.floor((Date.now() - new Date(r.created_at + '+07:00').getTime()) / 3600000);
-    o.for_super_admin = r.approver_emp_id === 'SUPER_ADMIN';
+    o.for_super_admin = false;
+    var by = /^SUP:/.test(str(r.filed_by)) ? findEmp_(state, str(r.filed_by).slice(4)) : null;
+    o.filed_by_name = by ? empName(by) : '';
     return o;
   });
 }
@@ -1384,7 +1453,7 @@ function apiEmployees_(actor) {
     var dept = findDept_(state, e.dept_id);
     return { emp_id: e.emp_id, name: empName(e), dept_id: e.dept_id, dept_name: dept ? dept.name : '', position: e.position,
       hire_date: e.hire_date, status: e.status, line_linked: !!str(e.line_user_id),
-      is_head: state.departments.some(function (d) { return str(d.head_emp_id) === str(e.emp_id); }) };
+      is_head: isSupervisor_(state, e.emp_id), link_code_pending: !!str(e.link_code_hash) && str(e.link_code_expires) > nowStamp() };
   });
 }
 
@@ -1395,6 +1464,8 @@ function apiEmployeeBalances_(actor, d) {
   ['emp_id', 'title', 'first_name', 'last_name', 'nickname', 'dept_id', 'position', 'hire_date', 'birth_date', 'phone', 'email', 'status', 'resign_date']
     .forEach(function (k) { detail[k] = emp[k]; });
   detail.line_linked = !!str(emp.line_user_id);
+  detail.is_supervisor = isSupervisor_(state, emp.emp_id);
+  detail.link_code_expires = str(emp.link_code_hash) && str(emp.link_code_expires) > nowStamp() ? str(emp.link_code_expires) : '';
   return { emp_id: emp.emp_id, name: empName(emp), employee: detail, balances: balancesNow(state, emp),
     ledger: state.ledger.filter(function (l) { return str(l.emp_id) === str(emp.emp_id); }) };
 }
@@ -1459,7 +1530,7 @@ function ensureGrants_() {
         var q = projectedGrant_(e, t, lys);
         if (!q || have[e.emp_id + '|' + t.type_id + '|' + lys]) return;
         rows.push({ entry_id: newId('L'), emp_id: e.emp_id, type_id: t.type_id, leave_year_start: lys, delta_days: q,
-          kind: 'GRANT', req_id: '', by: 'SYSTEM', at: now, note: 'สิทธิ์ปีการลา ' + lys });
+          kind: 'GRANT', req_id: '', by: 'SYSTEM', at: now, note: 'สิทธิ์ปีการลา ' + dmy(lys) });
       });
     });
     appendObjects(SHEETS.LEDGER, rows);
@@ -1510,13 +1581,13 @@ function hourlyJob() {
   withLock(function () {
     var state = loadState();
     state.requests.forEach(function (r) {
-      if (r.status !== 'PENDING' || r.approver_emp_id === 'SUPER_ADMIN') return;
+      if (r.status !== 'PENDING') return;
       var age = (Date.now() - new Date(r.created_at + '+07:00').getTime()) / 3600000;
       if (age < hours) return;
       setReq_(r, { status: 'ESCALATED' }, sys);
       escalated.push(r);
     });
-    escalated.forEach(function (r) { notifyApprover_(state, r, 'ESCALATED'); });
+    escalated.forEach(function (r) { notifyAdmins_(state, r, 'ESCALATED'); });
   });
   if (escalated.length) audit('system', 'SYSTEM', 'ESCALATION', 'Jobs', '', null, { count: escalated.length });
 }
@@ -1534,7 +1605,7 @@ function morningJob() {
     var t = findType_(state, r.type_id);
     if (!t || t.doc_rule !== 'REQUIRED_IF_MIN_DAYS' && t.doc_rule !== 'REQUIRED') return;
     var needs = t.doc_rule === 'REQUIRED' || Number(r.working_days) >= Number(t.doc_min_days || 999);
-    if (needs && attachmentsOf_(state, r.req_id).length === 0 && (sent[r.req_id] || 0) < maxReminders) notifyEmployee_(state, r, 'CERT_REMINDER');
+    if (needs && attachmentsOf_(state, r.req_id).length === 0 && (sent[r.req_id] || 0) < maxReminders) notifySupervisor_(state, r, 'CERT_REMINDER');
   });
 
   var stuck = state.requests.filter(function (r) {
@@ -1542,7 +1613,7 @@ function morningJob() {
     return PENDING_REQ.indexOf(r.status) !== -1 && r.start_date === state.today && t && Number(t.notice_days || 0) > 0;
   });
   stuck.forEach(function (r) {
-    pushToAdmins_(['ADMIN', 'SUPER_ADMIN'], 'PENDING_TODAY', 'ใบลาเริ่มวันนี้แต่ยังไม่ได้อนุมัติ', reqRows_(state, r), r.req_id);
+    pushToAdmins_(['ADMIN', 'SUPER_ADMIN'], 'PENDING_TODAY', 'ใบลาเริ่มวันนี้แต่ยังไม่ได้อนุมัติ', reqRows_(state, r), r.req_id, adminUrl_(r.req_id));
   });
 }
 
@@ -1614,10 +1685,49 @@ function saveEmployee(actor, d) {
 
 function unlinkEmployeeLine(actor, empId) {
   requireAdmin_(actor);
-  var before = updateWhere(SHEETS.EMPLOYEES, 'emp_id', empId, { line_user_id: '', line_linked_at: '', updated_at: nowStamp() });
+  var before = updateWhere(SHEETS.EMPLOYEES, 'emp_id', empId, { line_user_id: '', line_linked_at: '', updated_at: nowStamp(),
+    link_code_hash: '', link_code_expires: '', link_code_tries: '' });
   if (!before) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
   audit(actor.user.username, actor.user.role, 'LINE_UNLINKED', 'Employee', empId, { line_user_id: before.line_user_id }, null);
   return { ok: true };
+}
+
+/**
+ * One-time LINE link code for a supervisor (department head). Shown once on the admin page; stored only as a hash.
+ * Creating a new code replaces any earlier one.
+ */
+function createEmployeeLinkCode(actor, empId) {
+  requireAdmin_(actor);
+  ensureHeaders_(SHEETS.EMPLOYEES);
+  return withLock(function () {
+    var state = loadState(), emp = findEmp_(state, empId);
+    if (!emp || emp.status !== 'ACTIVE') fail_('NOT_FOUND', 'ไม่พบพนักงาน หรือพนักงานลาออกแล้ว');
+    if (!isSupervisor_(state, emp.emp_id)) fail_('NOT_SUPERVISOR', 'สร้างรหัสได้เฉพาะหัวหน้างาน — ตั้งให้เป็นหัวหน้าแผนกก่อน (ตั้งค่าการลา → แผนก)');
+    var code = '';
+    for (var i = 0; i < 6; i++) code += String(Math.floor(Math.random() * 10));
+    var days = Math.max(1, Number(state.settings.link_code_days || 7));
+    var expires = Utilities.formatDate(new Date(Date.now() + days * 86400000), TZ, "yyyy-MM-dd'T'HH:mm:ss");
+    updateWhere(SHEETS.EMPLOYEES, 'emp_id', emp.emp_id, { link_code_hash: hashPassword(code, 'link|' + emp.emp_id), link_code_expires: expires, link_code_tries: 0 });
+    audit(actor.user.username, actor.user.role, 'LINK_CODE_CREATED', 'Employee', emp.emp_id, null, { expires: expires });
+    return { ok: true, emp_id: emp.emp_id, name: empName(emp), code: code, expires: expires,
+      liff_url: prop_('LIFF_ID') ? 'https://liff.line.me/' + prop_('LIFF_ID') : '', already_linked: !!str(emp.line_user_id) };
+  });
+}
+
+function cancelEmployeeLinkCode(actor, empId) {
+  requireAdmin_(actor);
+  var before = updateWhere(SHEETS.EMPLOYEES, 'emp_id', empId, { link_code_hash: '', link_code_expires: '', link_code_tries: '' });
+  if (!before) fail_('NOT_FOUND', 'ไม่พบพนักงาน');
+  audit(actor.user.username, actor.user.role, 'LINK_CODE_CANCELLED', 'Employee', empId, null, null);
+  return { ok: true };
+}
+
+/** Add any missing column headers (used after an update adds columns to a tab). */
+function ensureHeaders_(name) {
+  var sh = sheet_(name), cols = SCHEMA[name];
+  var have = sh.getRange(1, 1, 1, cols.length).getValues()[0];
+  var missing = cols.some(function (c, i) { return str(have[i]) !== c; });
+  if (missing) sh.getRange(1, 1, 1, cols.length).setValues([cols]);
 }
 
 /* ------------------------------------------------------------------ departments, holidays, leave types, settings */
@@ -1682,7 +1792,7 @@ function saveLeaveType(actor, d) {
 }
 
 var SETTING_EDITABLE = ['work_days', 'self_service_after_months', 'escalation_hours', 'dept_max_concurrent', 'cert_reminder_max',
-  'attachment_retention_months', 'session_minutes', 'company_name'];
+  'attachment_retention_months', 'session_minutes', 'company_name', 'link_code_days'];
 
 function saveSettings(actor, map) {
   requireAdmin_(actor);
@@ -1703,7 +1813,7 @@ function adminSetup_(actor) {
   return {
     departments: state.departments, holidays: readAll(SHEETS.HOLIDAYS).sort(function (a, b) { return a.date < b.date ? -1 : 1; }),
     types: state.types.map(function (t) { var o = JSON.parse(JSON.stringify(t)); delete o._row; return o; }),
-    settings: SETTING_EDITABLE.reduce(function (o, k) { o[k] = state.settings[k] || ''; return o; }, {}),
+    settings: SETTING_EDITABLE.reduce(function (o, k) { o[k] = state.settings[k] || ({ link_code_days: '7' })[k] || ''; return o; }, {}),
     employees: state.employees.filter(function (e) { return e.status === 'ACTIVE'; }).map(function (e) { return { emp_id: e.emp_id, name: empName(e), dept_id: e.dept_id }; })
   };
 }
@@ -1809,7 +1919,9 @@ function dashboard_(actor) {
     Object.keys(cnt).forEach(function (x) { if (cnt[x] > max) doubles.push({ dept_id: d.dept_id, name: d.name, date: x, count: cnt[x] }); });
   });
   return {
-    today: t, headcount: active.length, linked: active.filter(function (e) { return str(e.line_user_id); }).length,
+    today: t, headcount: active.length,
+    supervisors: active.filter(function (e) { return isSupervisor_(state, e.emp_id); }).length,
+    linked: active.filter(function (e) { return str(e.line_user_id) && isSupervisor_(state, e.emp_id); }).length,
     away_today: awayToday,
     pending: state.requests.filter(function (r) { return r.status === 'PENDING'; }).length,
     escalated: state.requests.filter(function (r) { return r.status === 'ESCALATED'; }).length,
@@ -1896,7 +2008,7 @@ function reportStats_(actor, d) {
   };
 }
 
-/* Preview mode sample data (fictional). Add ?as=E-001 to the URL to view as the head, ?as=NEW to see first-time linking. */
+/* Preview mode sample data (fictional). The LINE app opens as supervisor E-001; add &as=NEW to see first-time linking, &as=E-002 for a non-supervisor. */
 (function () {
   Object.keys(SCHEMA).forEach(function (n) { __sheets[n] = [SCHEMA[n].slice()]; });
   appendObjects('LeaveTypes', SEED_LEAVE_TYPES.map(function (r) { var o = {}; SCHEMA.LeaveTypes.forEach(function (k, i) { o[k] = r[i]; }); return o; }));
@@ -1906,13 +2018,15 @@ function reportStats_(actor, d) {
   function nextWd(from, wd) { var d = from; while (isoWeekday(d) !== wd) d = addDays(d, 1); return d; }
   var mon = nextWd(addDays(t, 8), 1);
   appendObjects('Holidays', [{ date: addDays(mon, 14), name_th: 'วันหยุดตัวอย่าง' }]);
-  appendObjects('Departments', [{ dept_id: 'D01', name: 'ช่างเคาะ 1', head_emp_id: 'E-001', max_concurrent: 1, active: true }]);
-  var e = function (id, f, l, nick, hire, linked) {
-    return { emp_id: id, title: 'นาย', first_name: f, last_name: l, nickname: nick, dept_id: 'D01', position: id === 'E-001' ? 'หัวหน้าช่าง' : 'ช่างเคาะ',
+  appendObjects('Departments', [{ dept_id: 'D01', name: 'ช่างเคาะ 1', head_emp_id: 'E-001', max_concurrent: 1, active: true },
+    { dept_id: 'D02', name: 'ช่างสี', head_emp_id: 'E-005', max_concurrent: 1, active: true }]);
+  var e = function (id, f, l, nick, hire, linked, dept) {
+    return { emp_id: id, title: 'นาย', first_name: f, last_name: l, nickname: nick, dept_id: dept || 'D01', position: id === 'E-001' || id === 'E-005' ? 'หัวหน้าช่าง' : dept === 'D02' ? 'ช่างสี' : 'ช่างเคาะ',
       hire_date: hire, birth_date: '1995-05-05', status: 'ACTIVE', line_user_id: linked ? 'U-' + id : '' };
   };
   appendObjects('Employees', [e('E-001', 'สมชาย', 'ใจดี', 'ชาย', addDays(t, -2200), true), e('E-002', 'วีระ', 'ทองดี', 'ระ', addDays(t, -800), true),
-    e('E-003', 'ประยุทธ', 'ศรีสุข', 'ยุทธ', addDays(t, -1500), true), e('E-004', 'อนันต์', 'มีสุข', 'นันต์', addDays(t, -120), true)]);
+    e('E-003', 'ประยุทธ', 'ศรีสุข', 'ยุทธ', addDays(t, -1500), false), e('E-004', 'อนันต์', 'มีสุข', 'นันต์', addDays(t, -120), false),
+    e('E-005', 'ธนา', 'แก้วใส', 'นา', addDays(t, -1900), false, 'D02'), e('E-006', 'กิตติ', 'บุญมา', 'กิต', addDays(t, -700), false, 'D02')]);
   ensureGrants_();
   appendObjects('AdminUsers', ['super_admin|SUPER_ADMIN|ผู้ดูแลสูงสุด', 'owner|OWNER|เจ้าของกิจการ'].map(function (x) {
     var p = x.split('|');
@@ -1922,8 +2036,8 @@ function reportStats_(actor, d) {
   var now = nowStamp();
   function req(id, emp, type, s, en, status, extra) {
     var r = { req_id: id, emp_id: emp, dept_id: 'D01', type_id: type, start_date: s, end_date: en,
-      working_days: workingDates(s, en, [1, 2, 3, 4, 5], {}).length, reason: 'ตัวอย่าง', status: status, approver_emp_id: emp === 'E-001' ? 'SUPER_ADMIN' : 'E-001',
-      decided_by: '', decided_at: '', decision_note: '', filed_by: 'SELF', leave_year_start: '', created_at: now, updated_at: now };
+      working_days: workingDates(s, en, [1, 2, 3, 4, 5], {}).length, reason: 'ตัวอย่าง', status: status, approver_emp_id: 'ADMIN',
+      decided_by: status === 'APPROVED' ? 'super_admin' : '', decided_at: '', decision_note: '', filed_by: 'SUP:E-001', leave_year_start: '', created_at: now, updated_at: now };
     Object.keys(extra || {}).forEach(function (k) { r[k] = extra[k]; });
     var emp0 = readAll('Employees').filter(function (x) { return x.emp_id === emp; })[0];
     r.leave_year_start = leaveYearStart(emp0.hire_date, s);

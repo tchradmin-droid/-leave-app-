@@ -1,10 +1,11 @@
-/* ระบบลา — staff & head app (runs inside LINE via LIFF, or any browser). Vanilla JS, no build step. */
+/* ระบบลา — supervisor app (runs inside LINE via LIFF). Supervisors file leave for their department from the
+   employees' paper forms; Admin / Super-admin approve on the admin page. Vanilla JS, no build step. */
 (function () {
   'use strict';
   var CFG = window.APP_CONFIG || {};
-  // ?preview=1 runs the app on sample data in this browser only (no LINE, no real data). Add &as=E-001 to view as the head.
+  // ?preview=1 runs the app on sample data in this browser only (no LINE, no real data). &as=NEW shows first-time linking.
   if (new URLSearchParams(location.search).has('preview')) CFG.MOCK = true;
-  var S = { me: null, taken: null, form: null, calMonth: null };
+  var S = { me: null, taken: {}, form: null, calMonth: null, listFilter: 'open' };
   var $app = document.getElementById('app');
 
   /* ------------------------------------------------------------ helpers */
@@ -12,7 +13,7 @@
   var MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
   var MONTHS_FULL = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
   var DOW = ['จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.', 'อา.'];
-  var STATUS = { PENDING: 'รออนุมัติ', ESCALATED: 'รออนุมัติ (ส่งต่อแล้ว)', APPROVED: 'อนุมัติแล้ว', REJECTED: 'ไม่อนุมัติ',
+  var STATUS = { PENDING: 'รออนุมัติ', ESCALATED: 'รออนุมัติ (ค้างนาน)', APPROVED: 'อนุมัติแล้ว', REJECTED: 'ไม่อนุมัติ',
     AUTO_REJECTED: 'ไม่ผ่าน · แผนกมีคนลาแล้ว', CANCEL_REQUESTED: 'ขอยกเลิก', CANCELLED: 'ยกเลิกแล้ว' };
   function parts(iso) { var p = iso.split('-'); return { y: +p[0], m: +p[1], d: +p[2] }; }
   function isoOf(y, m, d) { var t = new Date(Date.UTC(y, m - 1, d)); return t.toISOString().slice(0, 10); }
@@ -27,6 +28,9 @@
   function workDays() { return String((S.me && S.me.settings && S.me.settings.work_days) || '1,2,3,4,5').split(',').map(Number); }
   function isOff(iso) { return workDays().indexOf(weekday(iso)) === -1 || (S.me && S.me.holidays.indexOf(iso) !== -1); }
   function typeOf(id) { return (S.me.types || []).filter(function (t) { return t.type_id === id; })[0]; }
+  function member(id) { return (S.me.team || []).filter(function (e) { return e.emp_id === id; })[0]; }
+  function deptKey() { var m = S.form && member(S.form.emp_id); return m ? m.dept_id : ''; }
+  function takenFor() { return S.taken[deptKey()] || null; }
 
   /* ------------------------------------------------------------ dd/mm/yyyy date fields
      Every <input type="date"> is turned into a text box that shows and accepts dd/mm/yyyy (C.E.; a
@@ -97,8 +101,8 @@
   }
   function errorBox(errors, kind) {
     if (!errors || !errors.length) return '';
-    return '<div class="notice ' + (kind || 'bad') + '">' + (errors.length === 1 ? esc(errors[0].msg || errors[0]) :
-      '<ul>' + errors.map(function (e) { return '<li>' + esc(e.msg || e) + '</li>'; }).join('') + '</ul>') + '</div>';
+    return '<div class="notice ' + (kind || 'bad') + '">' + (errors.length === 1 ? esc(errors[0].msg || errors[0].message || errors[0]) :
+      '<ul>' + errors.map(function (e) { return '<li>' + esc(e.msg || e.message || e) + '</li>'; }).join('') + '</ul>') + '</div>';
   }
   function loading(msg) { $app.innerHTML = '<div class="splash"><div class="spinner"></div><p>' + esc(msg || 'กำลังโหลด…') + '</p></div>'; }
 
@@ -156,7 +160,8 @@
       S.me = me;
       if (me.settings && me.settings.company_name) document.getElementById('brand').textContent = 'ระบบลา · ' + me.settings.company_name;
       if (!me.linked) { viewLink(); return; }
-      document.getElementById('who').textContent = me.employee.name + ' · ' + me.employee.dept_name;
+      if (!me.is_supervisor) { viewNotSupervisor(); return; }
+      document.getElementById('who').textContent = me.employee.name + ' · หัวหน้า' + me.departments.map(function (d) { return d.name; }).join(', ');
       var q = new URLSearchParams(location.search);
       if (q.get('page') === 'request' && q.get('id') && !location.hash) location.hash = '#req/' + q.get('id');
       window.addEventListener('hashchange', route);
@@ -169,19 +174,19 @@
   /* ------------------------------------------------------------ nav */
   var ICONS = {
     home: '<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+    list: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h7M9 16h7"/>',
     new: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M12 13v5M9.5 15.5h5"/>',
     mine: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h7M9 16h7"/>',
     team: '<circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M15 20c0-2.2.9-4 3-4.6"/>',
-    inbox: '<path d="M4 4h16v16H4z"/><path d="M4 14h5l1.5 2h3L15 14h5"/><path d="M9 8l2 2 4-4"/>'
+    inbox: ''
   };
   function renderTabs() {
-    var tabs = [['home', 'หน้าหลัก'], ['new', 'ขอลา'], ['mine', 'ใบลาของฉัน'], ['team', 'แผนก']];
-    if (S.me.is_head) tabs.push(['inbox', 'อนุมัติ']);
+    var tabs = [['home', 'หน้าหลัก'], ['new', 'บันทึกใบลา'], ['list', 'ใบลาแผนก'], ['team', 'ตารางแผนก']];
     var cur = (location.hash.replace('#', '').split('/')[0]) || 'home';
     if (cur === 'req') cur = '';
     var bar = document.getElementById('tabbar');
     bar.innerHTML = tabs.map(function (t) {
-      var dot = t[0] === 'inbox' && S.me.inbox_count ? '<span class="dot">' + S.me.inbox_count + '</span>' : '';
+      var dot = t[0] === 'list' && S.me.pending_count ? '<span class="dot">' + S.me.pending_count + '</span>' : '';
       return '<a href="#' + t[0] + '"' + (cur === t[0] ? ' aria-current="page"' : '') + '><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
         ICONS[t[0]] + '</svg>' + t[1] + dot + '</a>';
     }).join('');
@@ -193,60 +198,59 @@
     renderTabs();
     window.scrollTo(0, 0);
     if (p[0] === 'new') return viewNew();
-    if (p[0] === 'mine') return viewMine();
+    if (p[0] === 'list' || p[0] === 'mine') return viewList();
     if (p[0] === 'team') return viewTeam();
-    if (p[0] === 'inbox') return viewInbox();
     if (p[0] === 'req' && p[1]) return viewRequest(decodeURIComponent(p[1]));
     return viewHome();
   }
 
-  /* ------------------------------------------------------------ link LINE to employee */
+  /* ------------------------------------------------------------ link LINE (supervisors, one-time code from HR) */
   function viewLink() {
     document.getElementById('tabbar').hidden = true;
     $app.innerHTML =
-      '<h1>ยืนยันตัวตนครั้งแรก</h1>' +
-      '<p class="lead">' + (S.me.line_name ? 'สวัสดี ' + esc(S.me.line_name) + ' — ' : '') + 'กรอกรหัสพนักงานและวันเกิด เพื่อผูกบัญชี LINE นี้กับข้อมูลของคุณ ทำครั้งเดียว</p>' +
+      '<h1>ผูกบัญชี LINE</h1>' +
+      '<p class="lead">' + (S.me.line_name ? 'สวัสดี ' + esc(S.me.line_name) + ' — ' : '') + 'แอปนี้สำหรับหัวหน้างาน กรอกรหัสพนักงานและรหัสผูก LINE 6 หลักที่ได้จากฝ่ายบุคคล ทำครั้งเดียว</p>' +
       '<form id="f" class="panel" novalidate>' +
       '<label class="field"><span>รหัสพนักงาน</span><input type="text" name="emp_id" autocomplete="off" autocapitalize="characters" required placeholder="เช่น E-001"></label>' +
-      '<label class="field"><span>วันเกิด</span><input type="date" name="birth_date" required></label>' +
-      '<label class="check"><input type="checkbox" name="consent" required><span>ฉันยินยอมให้บริษัทใช้ข้อมูลการลาและเอกสารประกอบ (รวมถึงใบรับรองแพทย์) เพื่อบริหารการลาเท่านั้น ตามนโยบายคุ้มครองข้อมูลส่วนบุคคล</span></label>' +
-      '<div id="err"></div><button class="btn primary block" type="submit">ยืนยัน</button></form>' +
-      '<p class="muted">ข้อมูลไม่ตรงหรือเปลี่ยนเครื่อง LINE ใหม่ ติดต่อฝ่ายบุคคล</p>';
+      '<label class="field"><span>รหัสผูก LINE (6 หลัก)</span><input type="text" name="code" class="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="______"></label>' +
+      '<label class="check"><input type="checkbox" name="consent" required><span>ฉันจะใช้ข้อมูลการลาและเอกสารของพนักงาน (รวมถึงใบรับรองแพทย์) เพื่องานบริหารการลาเท่านั้น ตามนโยบายคุ้มครองข้อมูลส่วนบุคคลของบริษัท</span></label>' +
+      '<div id="err"></div><button class="btn primary block" type="submit">ผูกบัญชี</button></form>' +
+      '<p class="muted">รหัสใช้ได้ครั้งเดียวและมีวันหมดอายุ ถ้าหมดอายุ ทำหาย หรือเปลี่ยนเครื่อง ขอรหัสใหม่จากฝ่ายบุคคล</p>';
+    var code = document.querySelector('[name=code]');
+    code.addEventListener('input', function () { var v = code.value.replace(/\D/g, '').slice(0, 6); if (v !== code.value) code.value = v; });
     document.getElementById('f').addEventListener('submit', function (e) {
       e.preventDefault();
       var f = e.target, err = document.getElementById('err');
-      if (!f.emp_id.value.trim() || !f.birth_date.value) { err.innerHTML = errorBox([{ msg: 'กรอกรหัสพนักงานและวันเกิดให้ครบ' }]); return; }
-      if (!f.consent.checked) { err.innerHTML = errorBox([{ msg: 'กรุณาติ๊กยินยอมก่อน' }]); return; }
+      if (!f.emp_id.value.trim() || !/^\d{6}$/.test(f.code.value)) { err.innerHTML = errorBox([{ msg: 'กรอกรหัสพนักงาน และรหัสผูก LINE ให้ครบ 6 หลัก' }]); return; }
+      if (!f.consent.checked) { err.innerHTML = errorBox([{ msg: 'กรุณาติ๊กยอมรับก่อน' }]); return; }
       f.querySelector('button').disabled = true;
-      api('link', { emp_id: f.emp_id.value.trim(), birth_date: f.birth_date.value }).then(function () {
+      api('link', { emp_id: f.emp_id.value.trim(), code: f.code.value }).then(function () {
         toast('ผูกบัญชีเรียบร้อย'); start();
       }).catch(function (x) { err.innerHTML = errorBox([x]); f.querySelector('button').disabled = false; });
     });
   }
 
+  function viewNotSupervisor() {
+    document.getElementById('tabbar').hidden = true;
+    $app.innerHTML = '<h1>แอปนี้สำหรับหัวหน้างาน</h1><div class="notice warn">บัญชี LINE นี้ผูกกับ ' + esc(S.me.employee.name) +
+      ' ซึ่งไม่ได้เป็นหัวหน้างาน จึงใช้แอปไม่ได้</div><p>การลาให้เขียนใบลาส่งหัวหน้างาน หัวหน้างานจะบันทึกในระบบให้</p>' +
+      '<p class="muted">ถ้าคุณเป็นหัวหน้างาน กรุณาแจ้งฝ่ายบุคคลให้ตั้งเป็นหัวหน้าแผนก</p>';
+  }
+
   /* ------------------------------------------------------------ home */
   function viewHome() {
     var me = S.me;
-    var lys = me.balances[0];
-    var chips = me.balances.map(function (b) {
-      var locked = !me.self_service || (b.granted === 0 && b.type_id === 'VAC');
-      return '<div class="chip' + (locked && b.granted === 0 ? ' locked' : '') + '" style="--c:' + esc(b.color) + '">' +
-        '<div class="chip-swatch"><span class="chip-unit">เหลือ</span><span class="chip-num">' + Math.max(b.available, 0) + '</span><span class="chip-unit">จาก ' + b.granted + ' วัน</span></div>' +
-        '<div class="chip-name">' + esc(b.name_th) + '</div>' +
-        '<div class="chip-meta">' + (b.pending ? 'รออนุมัติ ' + b.pending + ' วัน' : 'ใช้แล้ว ' + b.used + ' วัน') + '</div></div>';
-    }).join('');
     $app.innerHTML =
       '<h1>สวัสดี ' + esc(me.employee.first_name) + '</h1>' +
-      '<p class="lead">ปีการลาของคุณ ' + (lys ? thaiDate(lys.leave_year_start) + ' – ' + thaiDate(lys.leave_year_end) : '') + '</p>' +
-      (me.self_service ? '' : '<div class="notice warn">คุณทำงานยังไม่ครบ ' + me.self_service_after_months + ' เดือน ยังยื่นลาในแอปเองไม่ได้ ถ้าต้องลา (เช่น ป่วย) ให้แจ้งผู้ดูแลระบบเพื่อบันทึกให้</div>') +
-      '<div class="chips">' + chips + '</div>' +
-      (me.self_service ? '<a class="btn primary block" href="#new" style="margin-top:12px">ขอลา</a>' : '') +
-      (me.is_head && me.inbox_count ? '<a class="notice info" style="display:block;text-decoration:none;color:inherit" href="#inbox"><b>มีใบลารออนุมัติ ' + me.inbox_count + ' รายการ</b> · แตะเพื่อดู</a>' : '') +
+      '<p class="lead">หัวหน้า' + esc(me.departments.map(function (d) { return d.name; }).join(', ')) + ' · พนักงาน ' + me.team.length + ' คน</p>' +
+      '<a class="btn primary block" href="#new">บันทึกใบลาให้พนักงาน</a>' +
+      '<p class="muted" style="margin-top:8px">รับใบลา (กระดาษ) จากพนักงาน แล้วบันทึกที่นี่ ฝ่ายบุคคลจะเป็นผู้อนุมัติ และแจ้งผลกลับทาง LINE นี้</p>' +
+      (me.pending_count ? '<a class="notice info" style="display:block;text-decoration:none;color:inherit" href="#list"><b>รอฝ่ายบุคคลอนุมัติ ' + me.pending_count + ' ใบ</b> · แตะเพื่อดู</a>' : '') +
       '<h2>ใบลาที่กำลังจะถึง</h2><div id="upcoming"><p class="muted">กำลังโหลด…</p></div>';
-    api('myRequests').then(function (list) {
+    api('teamRequests').then(function (list) {
       var up = list.filter(function (r) { return r.end_date >= today() && ['PENDING', 'ESCALATED', 'APPROVED', 'CANCEL_REQUESTED'].indexOf(r.status) !== -1; })
-        .sort(function (a, b) { return a.start_date < b.start_date ? -1 : 1; }).slice(0, 5);
-      document.getElementById('upcoming').innerHTML = up.length ? reqList(up, false) : '<div class="empty">ยังไม่มีใบลาที่กำลังจะถึง</div>';
+        .sort(function (a, b) { return a.start_date < b.start_date ? -1 : 1; }).slice(0, 8);
+      document.getElementById('upcoming').innerHTML = up.length ? reqList(up, true) : '<div class="empty">ยังไม่มีใบลาที่กำลังจะถึง</div>';
     }).catch(function (e) { document.getElementById('upcoming').innerHTML = errorBox([e]); });
   }
 
@@ -262,34 +266,64 @@
   /* ------------------------------------------------------------ new request */
   function viewNew() {
     var me = S.me;
-    if (!me.self_service) {
-      $app.innerHTML = '<h1>ขอลา</h1><div class="notice warn">คุณทำงานยังไม่ครบ ' + me.self_service_after_months + ' เดือน การลาในช่วงนี้ให้แจ้งผู้ดูแลระบบเพื่อบันทึกแทน</div>';
-      return;
-    }
-    S.form = S.form || { type_id: '', start: '', end: '', reason: '', files: [] };
+    S.form = S.form || { emp_id: '', type_id: '', start: '', end: '', reason: '', files: [] };
     var t0 = today();
     S.calMonth = S.calMonth || t0.slice(0, 7);
+    var byDept = {};
+    me.team.forEach(function (e) { (byDept[e.dept_name] = byDept[e.dept_name] || []).push(e); });
+    var opts = Object.keys(byDept).map(function (dn) {
+      return '<optgroup label="' + esc(dn) + '">' + byDept[dn].map(function (e) {
+        return '<option value="' + esc(e.emp_id) + '"' + (e.emp_id === S.form.emp_id ? ' selected' : '') + '>' + esc(e.emp_id + ' · ' + e.name) + (e.emp_id === me.employee.emp_id ? ' (ตัวเอง)' : '') + '</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
     $app.innerHTML =
-      '<h1>ขอลา</h1>' +
-      '<div class="two"><div>' +
+      '<h1>บันทึกใบลา</h1><p class="lead">กรอกตามใบลาที่พนักงานส่งมา</p>' +
+      '<label class="field"><span>พนักงาน</span><select id="emp"><option value="">— เลือกพนักงาน —</option>' + opts + '</select></label>' +
+      '<div id="empinfo"></div>' +
+      '<div id="formbody"' + (S.form.emp_id ? '' : ' hidden') + '><div class="two"><div>' +
       '<h2>ประเภทการลา</h2><div class="types" id="types"></div><div id="typeinfo"></div>' +
       '<h2>เลือกวัน</h2><p class="muted" style="margin-top:-4px">แตะวันแรก แล้วแตะวันสุดท้าย (ลาวันเดียวแตะวันเดียว)</p>' +
       '<div class="cal" id="cal"></div>' +
       '</div><div>' +
       '<div id="sum"></div>' +
-      '<label class="field"><span>เหตุผล</span><textarea id="reason" maxlength="300" placeholder="เช่น ไปงานแต่งญาติที่ต่างจังหวัด"></textarea></label>' +
+      '<label class="field"><span>เหตุผล (ตามใบลา)</span><textarea id="reason" maxlength="300" placeholder="เช่น ไปงานแต่งญาติที่ต่างจังหวัด"></textarea></label>' +
       '<div><b>เอกสารแนบ</b> <span class="muted" id="dochint"></span><div class="files" id="files"></div>' +
+      '<p class="muted" style="margin:6px 0 0">ถ่ายรูปใบลา หรือใบรับรองแพทย์แนบได้</p>' +
       '<input type="file" id="filein" accept="image/*,application/pdf" multiple hidden></div>' +
       '<div id="err"></div>' +
-      '<button class="btn primary block" id="send" style="margin-top:20px">ส่งใบลา</button>' +
-      '</div></div>';
+      '<button class="btn primary block" id="send" style="margin-top:20px">บันทึกใบลา</button>' +
+      '</div></div></div>';
+    document.getElementById('emp').addEventListener('change', function (e) {
+      S.form.emp_id = e.target.value; S.form.type_id = ''; S.form.start = S.form.end = '';
+      document.getElementById('formbody').hidden = !S.form.emp_id;
+      renderEmp(); renderTypes(); renderCal(); renderSummary();
+    });
     document.getElementById('reason').value = S.form.reason;
     document.getElementById('reason').addEventListener('input', function (e) { S.form.reason = e.target.value; });
     document.getElementById('filein').addEventListener('change', onFiles);
     document.getElementById('send').addEventListener('click', submitForm);
-    renderTypes(); renderFiles();
-    if (!S.taken) api('takenDates', { from: addDays(t0, -31), to: addDays(t0, 200) }).then(function (r) { S.taken = r.full; renderCal(); }).catch(function () { S.taken = []; renderCal(); });
-    renderCal(); renderSummary();
+    renderEmp(); renderTypes(); renderFiles(); renderCal(); renderSummary();
+  }
+
+  /* the chosen employee: balances, first-year notice, and their department's full days */
+  function renderEmp() {
+    var el = document.getElementById('empinfo'), m = member(S.form.emp_id), body = document.getElementById('formbody');
+    if (!m) { el.innerHTML = ''; return; }
+    if (!m.self_service) {
+      el.innerHTML = '<div class="notice warn">' + esc(m.name) + ' ทำงานยังไม่ครบ ' + S.me.self_service_after_months + ' เดือน บันทึกในแอปไม่ได้ กรุณาส่งใบลาให้ฝ่ายบุคคลบันทึกแทน</div>';
+      body.hidden = true; return;
+    }
+    body.hidden = false;
+    el.innerHTML = '<div class="chips small">' + m.balances.map(function (b) {
+      return '<div class="chip" style="--c:' + esc(b.color) + '"><div class="chip-swatch"><span class="chip-unit">เหลือ</span><span class="chip-num">' + Math.max(b.available, 0) +
+        '</span><span class="chip-unit">จาก ' + b.granted + '</span></div><div class="chip-name">' + esc(b.name_th) + '</div>' +
+        (b.pending ? '<div class="chip-meta">รออนุมัติ ' + b.pending + '</div>' : '') + '</div>';
+    }).join('') + '</div>';
+    var key = m.dept_id, t0 = today();
+    if (!S.taken[key]) {
+      S.taken[key] = [];
+      api('takenDates', { emp_id: m.emp_id, from: addDays(t0, -31), to: addDays(t0, 200) }).then(function (r) { S.taken[key] = r.full; renderCal(); }).catch(function () { });
+    }
   }
 
   function renderTypes() {
@@ -303,10 +337,10 @@
     });
     var t = sel && typeOf(sel), info = document.getElementById('typeinfo');
     if (!t) { info.innerHTML = ''; return; }
-    var bal = S.me.balances.filter(function (b) { return b.type_id === t.type_id; })[0];
+    var m = member(S.form.emp_id), bal = m && m.balances.filter(function (b) { return b.type_id === t.type_id; })[0];
     var bits = [];
     if (bal) bits.push('เหลือ ' + Math.max(bal.available, 0) + ' วัน');
-    bits.push(t.notice_days ? 'ต้องแจ้งล่วงหน้า ' + t.notice_days + ' วัน' : 'ยื่นย้อนหลังได้ภายใน 3 วันทำงานหลังกลับมา');
+    bits.push(t.notice_days ? 'ต้องแจ้งล่วงหน้า ' + t.notice_days + ' วัน' : 'บันทึกย้อนหลังได้ภายใน 3 วันทำงานหลังกลับมา');
     if (t.doc_rule === 'REQUIRED') bits.push('ต้องแนบเอกสาร');
     if (t.doc_rule === 'REQUIRED_IF_MIN_DAYS') bits.push('ลา ' + t.doc_min_days + ' วันขึ้นไปต้องมีใบรับรองแพทย์');
     if (t.blocked_by_slot) bits.push('แผนกลาได้วันละ 1 คน');
@@ -318,7 +352,8 @@
     var t = typeOf(S.form.type_id), t0 = today();
     var min = !t ? t0 : t.notice_days ? addDays(t0, t.notice_days) : addDays(t0, -30);
     var st = { off: isOff(iso), past: iso < min || iso > addDays(t0, 365), taken: false };
-    if (t && t.blocked_by_slot && S.taken && S.taken.indexOf(iso) !== -1) st.taken = true;
+    var tk = takenFor();
+    if (t && t.blocked_by_slot && tk && tk.indexOf(iso) !== -1) st.taken = true;
     return st;
   }
 
@@ -358,7 +393,8 @@
     if (!f.start || f.end !== f.start || iso < f.start) { f.start = f.end = iso; }
     else {
       var t = typeOf(f.type_id), blocked = false;
-      for (var d = f.start; d <= iso; d = addDays(d, 1)) if (t.blocked_by_slot && S.taken && S.taken.indexOf(d) !== -1 && !isOff(d)) blocked = true;
+      var tk = takenFor();
+      for (var d = f.start; d <= iso; d = addDays(d, 1)) if (t.blocked_by_slot && tk && tk.indexOf(d) !== -1 && !isOff(d)) blocked = true;
       if (blocked) { toast('ช่วงนี้มีวันที่แผนกมีคนลาแล้ว เลือกใหม่'); f.start = f.end = iso; }
       else f.end = iso;
     }
@@ -374,7 +410,7 @@
       '</span><b id="wd">…</b></div><div id="pv"></div></div>';
     clearTimeout(previewTimer);
     previewTimer = setTimeout(function () {
-      api('preview', { type_id: f.type_id, start_date: f.start, end_date: f.end, reason: f.reason || '-', attachment_count: f.files.length }).then(function (r) {
+      api('preview', { emp_id: f.emp_id, type_id: f.type_id, start_date: f.start, end_date: f.end, reason: f.reason || '-', attachment_count: f.files.length }).then(function (r) {
         var wd = document.getElementById('wd'); if (!wd) return;
         wd.textContent = r.dates.length + ' วันทำงาน';
         var errs = r.errors.filter(function (e) { return e.code !== 'NO_REASON'; });
@@ -433,28 +469,40 @@
   function submitForm() {
     var f = S.form, err = document.getElementById('err'), btn = document.getElementById('send');
     var problems = [];
+    if (!f.emp_id) problems.push({ msg: 'เลือกพนักงาน' });
     if (!f.type_id) problems.push({ msg: 'เลือกประเภทการลา' });
     if (!f.start) problems.push({ msg: 'เลือกวันที่ลา' });
     if (!f.reason.trim()) problems.push({ msg: 'ระบุเหตุผล' });
     if (problems.length) { err.innerHTML = errorBox(problems); return; }
-    btn.disabled = true; btn.textContent = f.files.length ? 'กำลังอัปโหลดไฟล์…' : 'กำลังส่ง…'; err.innerHTML = '';
+    btn.disabled = true; btn.textContent = f.files.length ? 'กำลังอัปโหลดไฟล์…' : 'กำลังบันทึก…'; err.innerHTML = '';
     uploadAll(f.files).then(function (ids) {
-      btn.textContent = 'กำลังส่ง…';
-      return api('submit', { input: { type_id: f.type_id, start_date: f.start, end_date: f.end, reason: f.reason.trim() }, att_ids: ids });
+      btn.textContent = 'กำลังบันทึก…';
+      return api('submit', { input: { emp_id: f.emp_id, type_id: f.type_id, start_date: f.start, end_date: f.end, reason: f.reason.trim() }, att_ids: ids });
     }).then(function (r) {
-      if (!r.ok) { err.innerHTML = errorBox(r.errors); btn.disabled = false; btn.textContent = 'ส่งใบลา'; return; }
-      S.form = null; S.taken = null;
-      toast('ส่งใบลาแล้ว รอหัวหน้าอนุมัติ');
+      if (!r.ok) { err.innerHTML = errorBox(r.errors); btn.disabled = false; btn.textContent = 'บันทึกใบลา'; return; }
+      S.form = null; S.taken = {};
+      toast('บันทึกแล้ว รอฝ่ายบุคคลอนุมัติ');
       refreshMe().then(function () { location.hash = '#req/' + encodeURIComponent(r.req.req_id); });
-    }).catch(function (e) { err.innerHTML = errorBox([e]); btn.disabled = false; btn.textContent = 'ส่งใบลา'; });
+    }).catch(function (e) { err.innerHTML = errorBox([e]); btn.disabled = false; btn.textContent = 'บันทึกใบลา'; });
   }
 
-  /* ------------------------------------------------------------ my requests */
-  function viewMine() {
+  /* ------------------------------------------------------------ department requests */
+  var FILTERS = [['open', 'รออนุมัติ', ['PENDING', 'ESCALATED', 'CANCEL_REQUESTED']], ['approved', 'อนุมัติแล้ว', ['APPROVED']],
+    ['closed', 'ไม่อนุมัติ / ยกเลิก', ['REJECTED', 'AUTO_REJECTED', 'CANCELLED']], ['all', 'ทั้งหมด', null]];
+  function viewList() {
     loading();
-    api('myRequests').then(function (list) {
-      $app.innerHTML = '<h1>ใบลาของฉัน</h1>' + (list.length ? reqList(list, false) :
-        '<div class="empty">ยังไม่มีใบลา<br><a class="btn primary" style="margin-top:12px" href="#new">ขอลา</a></div>');
+    api('teamRequests').then(function (list) {
+      var draw = function () {
+        var f = FILTERS.filter(function (x) { return x[0] === S.listFilter; })[0] || FILTERS[0];
+        var rows = f[2] ? list.filter(function (r) { return f[2].indexOf(r.status) !== -1; }) : list;
+        $app.innerHTML = '<h1>ใบลาแผนก</h1><div class="seg" role="tablist">' + FILTERS.map(function (x) {
+          var cnt = x[2] ? list.filter(function (r) { return x[2].indexOf(r.status) !== -1; }).length : list.length;
+          return '<button type="button" role="tab" aria-selected="' + (x[0] === f[0]) + '" data-f="' + x[0] + '">' + x[1] + ' <span class="muted">' + cnt + '</span></button>';
+        }).join('') + '</div>' +
+          (rows.length ? reqList(rows, true) : '<div class="empty">ไม่มีใบลาในหมวดนี้</div>');
+        $app.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { S.listFilter = b.getAttribute('data-f'); draw(); }); });
+      };
+      draw();
     }).catch(function (e) { $app.innerHTML = errorBox([e]); });
   }
 
@@ -462,26 +510,13 @@
   function viewTeam() {
     loading();
     api('deptCalendar', { days: 7 }).then(function (depts) {
-      var d = depts[0];
-      $app.innerHTML = '<h1>แผนก' + esc(d.name) + '</h1><p class="lead">ใครลาบ้างใน 7 วันทำงานข้างหน้า</p><div class="days">' + d.days.map(function (day) {
-        return '<div class="dayrow' + (day.slot_full ? ' full' : '') + '"><div class="d1">' + DOW[day.weekday - 1] + ' ' + dmy(day.date).slice(0, 5) + '<small>' + parts(day.date).y + '</small></div>' +
-          '<div>' + (day.away.length ? day.away.map(function (a) { return '<span class="person" style="--c:' + esc(a.color) + '">' + esc(a.name) + ' <span class="muted">' + esc(a.type) + '</span></span>'; }).join('') : '<span class="muted">ไม่มีคนลา</span>') + '</div>' +
-          '<div class="avail"><b>' + day.available + '/' + day.headcount + '</b>อยู่ทำงาน</div></div>';
-      }).join('') + '</div>';
-    }).catch(function (e) { $app.innerHTML = errorBox([e]); });
-  }
-
-  /* ------------------------------------------------------------ approval inbox (heads) */
-  function viewInbox() {
-    loading();
-    api('inbox').then(function (list) {
-      S.me.inbox_count = list.length; renderTabs();
-      $app.innerHTML = '<h1>รออนุมัติ</h1>' + (list.length ? '<ul class="list">' + list.map(function (r) {
-        return '<li><a class="row" style="color:inherit;text-decoration:none" href="#req/' + encodeURIComponent(r.req_id) + '"><span class="bar" style="--c:' + esc(r.color) + '"></span>' +
-          '<span class="grow"><span class="title">' + esc(r.name) + '</span><br><span class="sub">' + esc(r.type_name) + ' · ' + range(r.start_date, r.end_date) + ' · ' + r.working_days + ' วัน' +
-          (r.waiting_hours >= 24 ? ' · <b style="color:var(--warn)">รอ ' + Math.floor(r.waiting_hours / 24) + ' วัน</b>' : '') + '</span></span>' +
-          '<span class="badge st-' + r.status + '">' + (r.status === 'CANCEL_REQUESTED' ? 'ขอยกเลิก' : 'รออนุมัติ') + '</span></a></li>';
-      }).join('') + '</ul>' : '<div class="empty">ไม่มีใบลารออนุมัติ</div>');
+      $app.innerHTML = '<h1>ตารางแผนก</h1><p class="lead">ใครลาบ้างใน 7 วันทำงานข้างหน้า</p>' + depts.map(function (d) {
+        return (depts.length > 1 ? '<h2>' + esc(d.name) + '</h2>' : '') + '<div class="days">' + d.days.map(function (day) {
+          return '<div class="dayrow' + (day.slot_full ? ' full' : '') + '"><div class="d1">' + DOW[day.weekday - 1] + ' ' + dmy(day.date).slice(0, 5) + '<small>' + parts(day.date).y + '</small></div>' +
+            '<div>' + (day.away.length ? day.away.map(function (a) { return '<span class="person" style="--c:' + esc(a.color) + '">' + esc(a.name) + ' <span class="muted">' + esc(a.type) + '</span></span>'; }).join('') : '<span class="muted">ไม่มีคนลา</span>') + '</div>' +
+            '<div class="avail"><b>' + day.available + '/' + day.headcount + '</b>อยู่ทำงาน</div></div>';
+        }).join('') + '</div>';
+      }).join('');
     }).catch(function (e) { $app.innerHTML = errorBox([e]); });
   }
 
@@ -489,39 +524,31 @@
   function viewRequest(id) {
     loading();
     api('request', { req_id: id }).then(function (d) {
-      var r = d.req, mine = r.emp_id === S.me.employee.emp_id;
+      var r = d.req;
       var t = typeOf(r.type_id) || {};
       var needsDoc = t.doc_rule === 'REQUIRED' || (t.doc_rule === 'REQUIRED_IF_MIN_DAYS' && Number(r.working_days) >= t.doc_min_days);
-      var html = '<a class="linkbtn" href="' + (mine ? '#mine' : '#inbox') + '">‹ กลับ</a>' +
-        '<h1>' + esc(mine ? d.type.name_th : d.employee.name) + '</h1>' +
+      var open = ['PENDING', 'ESCALATED'].indexOf(r.status) !== -1;
+      var html = '<a class="linkbtn" href="#list">‹ ใบลาแผนก</a>' +
+        '<h1>' + esc(d.employee.name) + '</h1>' +
         '<p><span class="badge st-' + r.status + '">' + STATUS[r.status] + '</span></p>' +
         '<div class="panel"><dl class="kv">' +
-        (mine ? '' : '<dt>ประเภท</dt><dd>' + esc(d.type.name_th) + '</dd>') +
+        '<dt>ประเภท</dt><dd>' + esc(d.type.name_th) + '</dd>' +
         '<dt>วันที่</dt><dd>' + range(r.start_date, r.end_date) + '</dd>' +
         '<dt>จำนวน</dt><dd>' + r.working_days + ' วันทำงาน</dd>' +
         '<dt>เหตุผล</dt><dd>' + esc(r.reason) + '</dd>' +
         (r.decision_note ? '<dt>หมายเหตุ</dt><dd>' + esc(r.decision_note) + '</dd>' : '') +
-        '<dt>ยื่นเมื่อ</dt><dd>' + thaiDate(String(r.created_at).slice(0, 10)) + ' ' + String(r.created_at).slice(11, 16) + ' น.</dd>' +
+        '<dt>บันทึกเมื่อ</dt><dd>' + thaiDate(String(r.created_at).slice(0, 10)) + ' ' + String(r.created_at).slice(11, 16) + ' น.</dd>' +
         '</dl></div>' +
         '<h2>เอกสารแนบ</h2><div class="files" id="atts">' + (d.attachments.length ? d.attachments.map(function (a) {
           return '<button type="button" class="file" data-att="' + esc(a.att_id) + '" data-mime="' + esc(a.mime) + '">' + (a.mime === 'application/pdf' ? 'PDF' : 'รูปภาพ') + '<br>แตะเพื่อดู</button>';
         }).join('') : '<span class="muted">ไม่มี</span>') + '</div>';
 
-      if (mine && needsDoc && !d.attachments.length && ['PENDING', 'ESCALATED'].indexOf(r.status) !== -1)
-        html += '<div class="notice warn">ยังไม่ได้แนบเอกสาร หัวหน้าจะอนุมัติไม่ได้จนกว่าจะแนบ</div><button class="btn block" id="adddoc">แนบเอกสาร</button><input type="file" id="docin" accept="image/*,application/pdf" hidden>';
-
-      if (d.can_decide) {
-        html += '<h2>ก่อนอนุมัติ</h2>' + (d.check.ok ? '<div class="notice ok">ผ่านการตรวจทุกข้อ' +
-          (d.balance_after != null ? ' · หลังอนุมัติเหลือ ' + d.balance_after + ' วัน' : '') + '</div>' : errorBox(d.check.errors)) +
-          (d.check.will_auto_reject ? '<div class="notice warn">ถ้าอนุมัติ ใบลาอื่นในแผนกที่ขอวันเดียวกัน ' + d.check.will_auto_reject + ' ใบจะถูกปฏิเสธอัตโนมัติ</div>' : '') +
-          (d.check.double_absence && d.check.double_absence.length ? '<div class="notice warn">วันที่ ' + d.check.double_absence.map(function (x) { return thaiDate(x); }).join(', ') + ' แผนกมีคนลาอยู่แล้ว (ลาป่วย/อุบัติเหตุอนุมัติได้)</div>' : '') +
-          '<div class="btn-row"><button class="btn danger" id="rej">ไม่อนุมัติ</button><button class="btn dark" id="apv"' + (d.check.ok ? '' : ' disabled') + '>อนุมัติ</button></div>';
-      }
-      if (!mine && r.status === 'CANCEL_REQUESTED' && S.me.is_head)
-        html += '<h2>พนักงานขอยกเลิกใบลานี้</h2><div class="btn-row"><button class="btn" id="cno">ไม่ให้ยกเลิก</button><button class="btn dark" id="cyes">อนุมัติให้ยกเลิก</button></div>';
-      if (mine && ['PENDING', 'ESCALATED'].indexOf(r.status) !== -1) html += '<button class="btn danger block" style="margin-top:24px" id="cancel">ยกเลิกใบลา</button>';
-      if (mine && r.status === 'APPROVED' && r.start_date > today()) html += '<button class="btn danger block" style="margin-top:24px" id="askcancel">ขอยกเลิกใบลา</button><p class="muted">หัวหน้าต้องอนุมัติการยกเลิก แล้วระบบจะคืนวันลาให้</p>';
-      if (mine && r.status === 'APPROVED' && r.start_date <= today()) html += '<p class="muted" style="margin-top:24px">ใบลาเริ่มแล้ว ถ้าต้องแก้ไขติดต่อผู้ดูแลระบบ</p>';
+      if (open && needsDoc && !d.attachments.length) html += '<div class="notice warn">ยังไม่ได้แนบเอกสาร ฝ่ายบุคคลจะอนุมัติไม่ได้จนกว่าจะแนบ</div>';
+      if (open || r.status === 'APPROVED') html += '<button class="btn block" id="adddoc">แนบเอกสาร</button><input type="file" id="docin" accept="image/*,application/pdf" hidden>';
+      if (open) html += '<button class="btn danger block" style="margin-top:24px" id="cancel">ยกเลิกใบลา</button><p class="muted">ยังไม่ได้อนุมัติ ยกเลิกได้ทันที</p>';
+      if (r.status === 'APPROVED' && r.start_date > today()) html += '<button class="btn danger block" style="margin-top:24px" id="askcancel">ขอยกเลิกใบลา</button><p class="muted">ฝ่ายบุคคลต้องอนุมัติการยกเลิก แล้วระบบจะคืนวันลาให้</p>';
+      if (r.status === 'APPROVED' && r.start_date <= today()) html += '<p class="muted" style="margin-top:24px">ใบลาเริ่มแล้ว ถ้าต้องแก้ไขติดต่อฝ่ายบุคคล</p>';
+      if (r.status === 'CANCEL_REQUESTED') html += '<div class="notice info" style="margin-top:16px">ส่งคำขอยกเลิกแล้ว รอฝ่ายบุคคลพิจารณา</div>';
       $app.innerHTML = html;
       bindRequest(d);
     }).catch(function (e) { $app.innerHTML = '<a class="linkbtn" href="#home">‹ หน้าหลัก</a>' + errorBox([e]); });
@@ -558,28 +585,19 @@
         }).catch(function (e) { var v = document.querySelector('.viewer'); if (v) v.innerHTML = errorBox([e]); });
       });
     });
-    on('apv', function () {
-      openSheet('<h3>อนุมัติใบลานี้?</h3><p>' + esc(d.employee.name) + '<br>' + esc(d.type.name_th) + ' · ' + range(r.start_date, r.end_date) + '</p>' +
-        '<div class="btn-row"><button class="btn" data-close-btn>กลับ</button><button class="btn dark" id="go">อนุมัติ</button></div>', function (el) {
-          el.querySelector('#go').addEventListener('click', function () { this.disabled = true; act(api('approve', { req_id: r.req_id }), 'อนุมัติแล้ว แจ้งพนักงานทาง LINE แล้ว', function () { location.hash = '#inbox'; }); });
-        });
-    });
-    on('rej', function () { askReason('ไม่อนุมัติใบลา', 'ไม่อนุมัติ', true, function (why) { act(api('reject', { req_id: r.req_id, reason: why }), 'ไม่อนุมัติแล้ว แจ้งพนักงานทาง LINE แล้ว', function () { location.hash = '#inbox'; }); }); });
-    on('cyes', function () { act(api('decideCancel', { req_id: r.req_id, approve: true }), 'อนุมัติให้ยกเลิกแล้ว', function () { location.hash = '#inbox'; }); });
-    on('cno', function () { act(api('decideCancel', { req_id: r.req_id, approve: false }), 'ใบลายังมีผลตามเดิม', function () { location.hash = '#inbox'; }); });
     on('cancel', function () {
       openSheet('<h3>ยกเลิกใบลานี้?</h3><p>' + range(r.start_date, r.end_date) + '</p><div class="btn-row"><button class="btn" data-close-btn>กลับ</button><button class="btn danger" id="go">ยกเลิกใบลา</button></div>', function (el) {
-        el.querySelector('#go').addEventListener('click', function () { this.disabled = true; act(api('cancel', { req_id: r.req_id }), 'ยกเลิกใบลาแล้ว'); });
+        el.querySelector('#go').addEventListener('click', function () { this.disabled = true; act(api('cancel', { req_id: r.req_id }), 'ยกเลิกใบลาแล้ว', function () { location.hash = '#list'; }); });
       });
     });
-    on('askcancel', function () { askReason('ขอยกเลิกใบลา', 'ส่งคำขอยกเลิก', true, function (why) { act(api('cancel', { req_id: r.req_id, reason: why }), 'ส่งคำขอยกเลิกให้หัวหน้าแล้ว'); }); });
+    on('askcancel', function () { askReason('ขอยกเลิกใบลา', 'ส่งคำขอยกเลิก', true, function (why) { act(api('cancel', { req_id: r.req_id, reason: why }), 'ส่งคำขอยกเลิกให้ฝ่ายบุคคลแล้ว'); }); });
     on('adddoc', function () { document.getElementById('docin').click(); });
     var docin = document.getElementById('docin');
     if (docin) docin.addEventListener('change', function (e) {
       var file = e.target.files[0]; if (!file) return;
       var prep = file.type === 'application/pdf' ? readB64(file).then(function (b) { return { name: file.name, mime: file.type, base64: b }; }) : shrinkImage(file);
       toast('กำลังอัปโหลด…');
-      act(prep.then(function (f) { return uploadAll([f]); }).then(function (ids) { return api('addAttachments', { req_id: r.req_id, att_ids: ids }); }), 'แนบเอกสารแล้ว แจ้งหัวหน้าแล้ว');
+      act(prep.then(function (f) { return uploadAll([f]); }).then(function (ids) { return api('addAttachments', { req_id: r.req_id, att_ids: ids }); }), 'แนบเอกสารแล้ว แจ้งฝ่ายบุคคลแล้ว');
     });
   }
 

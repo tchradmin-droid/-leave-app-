@@ -138,7 +138,7 @@
   }
   function viewLogin(msg) {
     document.getElementById('side').hidden = true; document.getElementById('who').textContent = '';
-    $app.innerHTML = '<div class="login"><h1>เข้าสู่ระบบผู้ดูแล</h1><p class="lead">สำหรับ Super-admin, Admin และ Owner · พนักงานและหัวหน้าใช้แอปใน LINE</p>' +
+    $app.innerHTML = '<div class="login"><h1>เข้าสู่ระบบผู้ดูแล</h1><p class="lead">สำหรับ Super-admin, Admin และ Owner · หัวหน้างานใช้แอปใน LINE</p>' +
       (msg ? '<div class="notice warn">' + esc(msg) + '</div>' : '') +
       '<form class="panel" id="f"><label class="field"><span>ชื่อผู้ใช้</span><input type="text" name="username" autocomplete="username" required></label>' +
       '<label class="field"><span>รหัสผ่าน</span><input type="password" name="password" autocomplete="current-password" required style="width:100%;min-height:48px;padding:10px 12px;border:1px solid #AEB7C1;border-radius:6px"></label>' +
@@ -147,7 +147,7 @@
     document.getElementById('f').addEventListener('submit', function (e) {
       e.preventDefault();
       var d = formData(e.target), b = e.target.querySelector('button'); b.disabled = true;
-      api('login', { username: d.username, password: d.password }).then(function (r) {
+      api('login', { username: d.username, password: d.password, page_url: location.href }).then(function (r) {
         A.session = r.session; A.user = r.user;
         try { sessionStorage.setItem('adm_session', r.session); sessionStorage.setItem('adm_user', JSON.stringify(r.user)); } catch (x) { }
         if (r.user.must_change) viewChangePassword(true); else start();
@@ -223,7 +223,7 @@
       (opts.waiting ? '<th class="num">รอ (ชม.)</th>' : '') + '</tr></thead><tbody>' + list.map(function (r) {
         return '<tr class="click" data-href="#req/' + encodeURIComponent(r.req_id) + '"><td>' + esc(r.name) + '<br><span class="muted">' + esc(r.emp_id) + '</span></td><td>' + esc(deptName(r.dept_id)) +
           '</td><td><span class="swatch" style="--c:' + esc(r.color) + '"></span>' + esc(r.type_name) + '</td><td>' + range(r.start_date, r.end_date) + '</td><td class="num">' + r.working_days +
-          '</td><td><span class="badge st-' + r.status + '">' + STATUS[r.status] + '</span>' + (r.for_super_admin ? '<br><span class="muted">รอ Super-admin</span>' : '') + '</td>' +
+          '</td><td><span class="badge st-' + r.status + '">' + STATUS[r.status] + '</span>' + (r.filed_by_name ? '<br><span class="muted">บันทึกโดย ' + esc(r.filed_by_name) + '</span>' : '') + '</td>' +
           (opts.waiting ? '<td class="num">' + r.waiting_hours + '</td>' : '') + '</tr>';
       }).join('') + '</tbody></table></div>';
   }
@@ -239,10 +239,9 @@
         kpi(d.away_today.length + '/' + d.headcount, 'ลาวันนี้ / พนักงานทั้งหมด', '#cal') +
         kpi(d.pending + d.escalated, 'รออนุมัติ', '#inbox', d.pending + d.escalated ? 'attn' : '') +
         kpi(d.escalated, 'ค้างเกิน 24 ชม.', '#inbox', d.escalated ? 'alert' : '') +
-        kpi(d.for_super_admin, 'รอ Super-admin (ใบลาหัวหน้า)', '#inbox', d.for_super_admin ? 'attn' : '') +
         kpi(d.cancel_requests, 'ขอยกเลิก', '#inbox') +
         kpi(d.missing_cert, 'ยังไม่แนบใบรับรองแพทย์', '#requests') +
-        kpi(d.linked + '/' + d.headcount, 'ผูก LINE แล้ว', '#emps', d.linked < d.headcount ? 'attn' : '') + '</div>' +
+        kpi(d.linked + '/' + d.supervisors, 'หัวหน้างานผูก LINE แล้ว', '#emps', d.linked < d.supervisors ? 'attn' : '') + '</div>' +
         '<div class="grid2"><div><h2>ลาวันนี้</h2>' + reqTable(d.away_today, { empty: 'วันนี้ไม่มีใครลา' }) + '</div>' +
         '<div><h2>แผนกที่มีคนลาซ้อน (14 วันข้างหน้า)</h2>' + (d.double_absences.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>วันที่</th><th>แผนก</th><th class="num">คนลา</th></tr></thead><tbody>' +
           d.double_absences.map(function (x) { return '<tr><td>' + thaiDate(x.date, true) + '</td><td>' + esc(x.name) + '</td><td class="num">' + x.count + '</td></tr>'; }).join('') + '</tbody></table></div>' :
@@ -257,10 +256,11 @@
     loading();
     api('inbox').then(function (list) {
       lastCount = list.length; nav(lastCount);
-      var sa = list.filter(function (r) { return r.for_super_admin || r.status === 'ESCALATED'; }), rest = list.filter(function (r) { return sa.indexOf(r) === -1; });
+      var cr = list.filter(function (r) { return r.status === 'CANCEL_REQUESTED'; }), rest = list.filter(function (r) { return cr.indexOf(r) === -1; });
       $app.innerHTML = '<div class="page-head"><h1>รออนุมัติ</h1></div>' +
-        '<h2>ต้องให้ Super-admin พิจารณา (ใบลาหัวหน้า / ค้างเกินกำหนด)</h2>' + reqTable(sa, { waiting: true, empty: 'ไม่มี' }) +
-        '<h2>รอหัวหน้าแผนก (Admin เข้าไปตัดสินแทนได้)</h2>' + reqTable(rest, { waiting: true, empty: 'ไม่มี' });
+        '<p class="lead">ใบลาที่หัวหน้างานบันทึกจากใบลาของพนักงาน เรียงจากรอนานที่สุด</p>' +
+        '<h2>ใบลารออนุมัติ</h2>' + reqTable(rest, { waiting: true, empty: 'ไม่มีใบลารออนุมัติ' }) +
+        '<h2>หัวหน้างานขอยกเลิกใบลาที่อนุมัติแล้ว</h2>' + reqTable(cr, { waiting: true, empty: 'ไม่มี' });
       bindRows();
     }).catch(function (e) { $app.innerHTML = errorBox([e]); });
   }
@@ -273,10 +273,9 @@
         '<p><span class="badge st-' + r.status + '">' + STATUS[r.status] + '</span></p><div class="grid2"><div class="panel"><dl class="kv">' +
         '<dt>รหัส</dt><dd>' + esc(d.employee.emp_id) + ' · ' + esc(deptName(d.employee.dept_id)) + '</dd><dt>ประเภท</dt><dd>' + esc(d.type.name_th) + '</dd>' +
         '<dt>วันที่</dt><dd>' + range(r.start_date, r.end_date) + '</dd><dt>จำนวน</dt><dd>' + r.working_days + ' วันทำงาน</dd><dt>เหตุผล</dt><dd>' + esc(r.reason) + '</dd>' +
-        '<dt>ผู้อนุมัติ</dt><dd>' + (r.approver_emp_id === 'SUPER_ADMIN' ? 'Super-admin' : esc(r.approver_emp_id)) + '</dd>' +
         (r.decided_by ? '<dt>ตัดสินโดย</dt><dd>' + esc(r.decided_by) + ' · ' + stamp(r.decided_at) + '</dd>' : '') +
         (r.decision_note ? '<dt>หมายเหตุ</dt><dd>' + esc(r.decision_note) + '</dd>' : '') +
-        '<dt>ยื่นโดย</dt><dd>' + esc(r.filed_by) + ' · ' + stamp(r.created_at) + '</dd><dt>รหัสใบลา</dt><dd>' + esc(r.req_id) + '</dd></dl></div><div>' +
+        '<dt>บันทึกโดย</dt><dd>' + esc(d.filed_by_text || r.filed_by) + ' · ' + stamp(r.created_at) + '</dd><dt>รหัสใบลา</dt><dd>' + esc(r.req_id) + '</dd></dl></div><div>' +
         '<h2 style="margin-top:0">เอกสารแนบ</h2><div class="files">' + (d.attachments.length ? d.attachments.map(function (a) {
           return '<button type="button" class="file" data-att="' + esc(a.att_id) + '">' + (a.mime === 'application/pdf' ? 'PDF' : 'รูปภาพ') + '<br>' + a.size_kb + ' KB</button>';
         }).join('') : '<span class="muted">ไม่มี</span>') + '</div>';
@@ -286,7 +285,7 @@
           (d.check.double_absence && d.check.double_absence.length ? '<div class="notice warn">แผนกมีคนลาอยู่แล้ววันที่ ' + d.check.double_absence.map(function (x) { return thaiDate(x); }).join(', ') + '</div>' : '') +
           '<div class="btn-row"><button class="btn danger" id="rej">ไม่อนุมัติ</button><button class="btn dark" id="apv"' + (d.check.ok ? '' : ' disabled') + '>อนุมัติ</button></div>';
       }
-      if (canEdit() && r.status === 'CANCEL_REQUESTED') html += '<h2>พนักงานขอยกเลิก</h2><div class="btn-row"><button class="btn" id="cno">ไม่ให้ยกเลิก</button><button class="btn dark" id="cyes">อนุมัติให้ยกเลิก</button></div>';
+      if (canEdit() && r.status === 'CANCEL_REQUESTED') html += '<h2>หัวหน้างานขอยกเลิก</h2><div class="btn-row"><button class="btn" id="cno">ไม่ให้ยกเลิก</button><button class="btn dark" id="cyes">อนุมัติให้ยกเลิก</button></div>';
       if (canEdit() && active) html += '<h2>ผู้ดูแลระบบ</h2><button class="btn danger" id="acancel">ยกเลิกใบลานี้ (คืนวันลา)</button>';
       html += '</div></div>';
       $app.innerHTML = html;
@@ -301,7 +300,7 @@
       });
       var on = function (id, fn) { var el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
       var done = function (msg) { return function (res) { if (res && res.ok === false) return failSheet(res); closeSheet(); toast(msg); viewRequest(id); }; };
-      on('apv', function () { api('approve', { req_id: id }).then(done('อนุมัติแล้ว แจ้งพนักงานทาง LINE แล้ว')).catch(failSheet); });
+      on('apv', function () { api('approve', { req_id: id }).then(done('อนุมัติแล้ว แจ้งหัวหน้างานทาง LINE แล้ว')).catch(failSheet); });
       on('rej', function () { askReason('ไม่อนุมัติใบลา', 'ไม่อนุมัติ', function (why) { api('reject', { req_id: id, reason: why }).then(done('ไม่อนุมัติแล้ว')).catch(failSheet); }); });
       on('cyes', function () { api('decideCancel', { req_id: id, approve: true }).then(done('อนุมัติให้ยกเลิกแล้ว')).catch(failSheet); });
       on('cno', function () { api('decideCancel', { req_id: id, approve: false }).then(done('ใบลายังมีผล')).catch(failSheet); });
@@ -349,7 +348,7 @@
         return api('fileOnBehalf', { input: { emp_id: d.emp_id, type_id: d.type_id, start_date: d.start_date, end_date: d.end_date, reason: d.reason }, att_ids: ids });
       }).then(function (r) {
         if (!r.ok) { document.getElementById('err').innerHTML = errorBox(r.errors); btn.disabled = false; return; }
-        toast('บันทึกการลาแล้ว แจ้งพนักงานทาง LINE แล้ว'); location.hash = '#req/' + encodeURIComponent(r.req.req_id);
+        toast('บันทึกการลาแล้ว แจ้งหัวหน้างานทาง LINE แล้ว'); location.hash = '#req/' + encodeURIComponent(r.req.req_id);
       }).catch(function (x) { document.getElementById('err').innerHTML = errorBox([x]); btn.disabled = false; });
     });
   }
@@ -414,17 +413,17 @@
         '<div class="toolbar"><input id="q" placeholder="ค้นหาชื่อ/รหัส"><select id="dp"><option value="">ทุกแผนก</option>' +
         A.setup.departments.map(function (d) { return '<option value="' + esc(d.dept_id) + '">' + esc(d.name) + '</option>'; }).join('') +
         '</select><select id="st"><option value="ACTIVE">ทำงานอยู่</option><option value="RESIGNED">ลาออก</option><option value="">ทั้งหมด</option></select>' +
-        '<select id="ln"><option value="">LINE ทั้งหมด</option><option value="no">ยังไม่ผูก LINE</option></select>' +
+        '<select id="ln"><option value="">ทุกคน</option><option value="sup">เฉพาะหัวหน้างาน</option><option value="no">หัวหน้างานที่ยังไม่ผูก LINE</option></select>' +
         '<button class="btn sm" id="csv">ส่งออก CSV</button></div><div id="res"></div>';
       var draw = function () {
         var q = document.getElementById('q').value.trim().toLowerCase(), dp = document.getElementById('dp').value, st = document.getElementById('st').value, ln = document.getElementById('ln').value;
         var rows = list.filter(function (e) {
-          return (!q || (e.name + ' ' + e.emp_id).toLowerCase().indexOf(q) !== -1) && (!dp || e.dept_id === dp) && (!st || e.status === st) && (!ln || !e.line_linked);
+          return (!q || (e.name + ' ' + e.emp_id).toLowerCase().indexOf(q) !== -1) && (!dp || e.dept_id === dp) && (!st || e.status === st) && (!ln || (ln === 'sup' && e.is_head) || (ln === 'no' && e.is_head && !e.line_linked));
         });
         document.getElementById('res').innerHTML = '<p class="muted">' + rows.length + ' คน</p><div class="tbl-wrap"><table class="tbl"><thead><tr><th>รหัส</th><th>ชื่อ</th><th>แผนก</th><th>ตำแหน่ง</th><th>เริ่มงาน</th><th>LINE</th><th>สถานะ</th></tr></thead><tbody>' +
           rows.map(function (e) {
             return '<tr class="click" data-href="#emp/' + encodeURIComponent(e.emp_id) + '"><td>' + esc(e.emp_id) + '</td><td>' + esc(e.name) + (e.is_head ? ' <span class="badge st-APPROVED">หัวหน้า</span>' : '') + '</td><td>' + esc(e.dept_name) +
-              '</td><td>' + esc(e.position) + '</td><td>' + thaiDate(e.hire_date) + '</td><td>' + (e.line_linked ? '✓' : '<span class="muted">ยังไม่ผูก</span>') + '</td><td>' + (e.status === 'ACTIVE' ? 'ทำงาน' : 'ลาออก') + '</td></tr>';
+              '</td><td>' + esc(e.position) + '</td><td>' + thaiDate(e.hire_date) + '</td><td>' + (!e.is_head ? '<span class="muted">—</span>' : e.line_linked ? '✓' : e.link_code_pending ? '<span class="muted">ส่งรหัสแล้ว</span>' : '<span class="muted">ยังไม่ผูก</span>') + '</td><td>' + (e.status === 'ACTIVE' ? 'ทำงาน' : 'ลาออก') + '</td></tr>';
           }).join('') + '</tbody></table></div>';
         bindRows();
         document.getElementById('csv').onclick = function () {
@@ -448,6 +447,45 @@
     return best.prefix + s;
   }
 
+  /** LINE access on the employee page: only supervisors (department heads) use the LINE app; they link with a one-time code. */
+  function linePanel(e) {
+    var h = '<div class="panel" style="margin-top:16px"><h2 style="margin-top:0">แอป LINE</h2>';
+    if (!e.is_supervisor) {
+      h += '<p class="muted">พนักงานทั่วไปไม่ใช้แอป หัวหน้างานจะบันทึกใบลาให้ · ถ้าคนนี้เป็นหัวหน้างาน ตั้งเป็นหัวหน้าแผนกก่อน (ตั้งค่าการลา → แผนก)</p>';
+      if (e.line_linked && canEdit()) h += '<button type="button" class="btn sm" id="unlink">ยกเลิกการผูก LINE เดิม</button>';
+      return h + '</div>';
+    }
+    if (e.line_linked) {
+      h += '<p><span class="badge st-APPROVED">ผูก LINE แล้ว</span> ใช้แอปบันทึกใบลาได้</p>';
+      if (canEdit()) h += '<button type="button" class="btn sm" id="unlink">ยกเลิกการผูก LINE (เปลี่ยนเครื่อง)</button>';
+    } else {
+      h += e.link_code_expires ? '<p><span class="badge st-PENDING">ส่งรหัสแล้ว</span> รหัสใช้ได้ถึง ' + stamp(e.link_code_expires) + ' น. (ยังไม่ได้ผูก)</p>' :
+        '<p class="muted">ยังไม่ได้ผูก LINE · สร้างรหัส 6 หลัก แล้วให้หัวหน้างานกรอกในแอป LINE</p>';
+      if (canEdit()) h += '<div class="btn-row" style="justify-content:flex-start"><button type="button" class="btn sm primary" id="mkcode">' + (e.link_code_expires ? 'สร้างรหัสใหม่' : 'สร้างรหัสผูก LINE') + '</button>' +
+        (e.link_code_expires ? '<button type="button" class="btn sm" id="cancelcode">ยกเลิกรหัส</button>' : '') + '</div>';
+    }
+    return h + '</div>';
+  }
+
+  function showLinkCode(k) {
+    var steps = '<ol><li>เปิด LINE แล้วสแกน QR (หรือเปิดลิงก์ระบบลา)</li><li>กรอกรหัสพนักงาน <b>' + esc(k.emp_id) + '</b></li><li>กรอกรหัสผูก LINE 6 หลักด้านบน แล้วกด "ผูกบัญชี"</li></ol>';
+    openSheet('<h3>รหัสผูก LINE ของ ' + esc(k.name) + '</h3><div class="code-big">' + esc(k.code) + '</div>' +
+      '<p>ใช้ได้ครั้งเดียว ถึง <b>' + stamp(k.expires) + ' น.</b> · รหัสนี้แสดงครั้งเดียว ให้หัวหน้างานโดยตรง (ไม่ส่งในกลุ่ม)</p>' + steps +
+      (k.already_linked ? '<div class="notice warn">คนนี้ผูก LINE อยู่แล้ว ถ้าจะเปลี่ยนเครื่อง ต้องยกเลิกการผูกเดิมก่อน</div>' : '') +
+      '<div class="btn-row"><button class="btn" id="slipprint">พิมพ์ใบแจ้งรหัส</button><button class="btn dark" data-close-btn>เสร็จ</button></div>', function (el) {
+        el.querySelector('#slipprint').addEventListener('click', function () {
+          var box = document.createElement('div'); box.id = 'slip-print';
+          box.innerHTML = '<div class="slip"><h2>รหัสผูก LINE — ระบบลา</h2><p>' + esc(k.name) + ' · รหัสพนักงาน <b>' + esc(k.emp_id) + '</b></p>' +
+            '<div class="code-big">' + esc(k.code) + '</div><p>ใช้ได้ครั้งเดียว ถึง ' + stamp(k.expires) + ' น.</p><div id="slipqr" style="margin:8px 0"></div>' + steps +
+            '<p class="muted">เก็บเป็นความลับ ถ้าหมดอายุหรือทำหาย ขอรหัสใหม่จากฝ่ายบุคคล</p></div>';
+          document.body.appendChild(box);
+          if (window.QRCode && k.liff_url) new QRCode(box.querySelector('#slipqr'), { text: k.liff_url, width: 140, height: 140 });
+          document.body.classList.add('printing-slip');
+          setTimeout(function () { window.print(); document.body.classList.remove('printing-slip'); box.remove(); }, 300);
+        });
+      });
+  }
+
   function viewEmployee(id) {
     var isNew = id === 'new';
     var load = isNew ? Promise.all([api('employees'), null]) : Promise.all([api('employees'), api('employeeBalances', { emp_id: id })]);
@@ -462,18 +500,18 @@
         return '<label class="field"><span>' + label + '</span><input type="' + (type || 'text') + '" name="' + name + '" value="' + esc(val || '') + '"' + (extra || '') + dis + '></label>';
       };
       $app.innerHTML = '<a class="linkbtn" href="#emps">‹ พนักงาน</a><div class="page-head"><h1>' + (isNew ? 'เพิ่มพนักงาน' : esc(e.name)) + '</h1></div>' +
-        '<div class="grid2"><form class="panel" id="ef"><h2 style="margin-top:0">ข้อมูลพนักงาน</h2><div class="form-grid">' +
-        f('emp_id', isNew ? 'รหัสพนักงาน' : 'รหัสพนักงาน', 'text', e.emp_id, ' readonly') +
+        '<div class="grid2"><div><form class="panel" id="ef"><h2 style="margin-top:0">ข้อมูลพนักงาน</h2><div class="form-grid">' +
+        f('emp_id', isNew ? 'รหัสพนักงาน (ระบบกำหนดให้อัตโนมัติ)' : 'รหัสพนักงาน', 'text', e.emp_id, ' readonly') +
         '<label class="field"><span>คำนำหน้า</span><select name="title"' + dis + '>' + ['นาย', 'นาง', 'นางสาว'].map(function (t) { return '<option' + (e.title === t ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select></label>' +
         f('first_name', 'ชื่อ', 'text', e.first_name) + f('last_name', 'นามสกุล', 'text', e.last_name) + f('nickname', 'ชื่อเล่น', 'text', e.nickname) +
         '<label class="field"><span>แผนก</span><select name="dept_id"' + dis + '>' + A.setup.departments.map(function (d) { return '<option value="' + esc(d.dept_id) + '"' + (d.dept_id === e.dept_id ? ' selected' : '') + '>' + esc(d.name) + '</option>'; }).join('') + '</select></label>' +
-        f('position', 'ตำแหน่ง', 'text', e.position) + f('hire_date', 'วันเริ่มงาน', 'date', e.hire_date) + f('birth_date', 'วันเกิด (ใช้ยืนยันตอนผูก LINE)', 'date', e.birth_date) +
+        f('position', 'ตำแหน่ง', 'text', e.position) + f('hire_date', 'วันเริ่มงาน', 'date', e.hire_date) + f('birth_date', 'วันเกิด', 'date', e.birth_date) +
         f('phone', 'เบอร์มือถือ', 'text', e.phone) + f('email', 'อีเมล', 'email', e.email) +
         '<label class="field"><span>สถานะ</span><select name="status"' + dis + '><option value="ACTIVE"' + (e.status === 'ACTIVE' ? ' selected' : '') + '>ทำงาน</option><option value="RESIGNED"' + (e.status === 'RESIGNED' ? ' selected' : '') + '>ลาออก</option></select></label>' +
         f('resign_date', 'วันที่ลาออก', 'date', e.resign_date) + '</div>' +
         (isNew ? '' : '<p class="muted">เปลี่ยนวันเริ่มงานแล้ว ปีการลาจะคำนวณใหม่</p>') +
         '<div id="err"></div>' + (canEdit() ? '<button class="btn primary">บันทึก</button>' : '') +
-        (!isNew && canEdit() && e.line_linked ? ' <button type="button" class="btn" id="unlink">ยกเลิกการผูก LINE</button>' : '') + '</form>' +
+        '</form>' + (isNew ? '' : linePanel(e)) + '</div>' +
         (isNew ? '' : '<div><h2 style="margin-top:0">ยอดวันลาปีนี้</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>ประเภท</th><th class="num">สิทธิ์</th><th class="num">ใช้แล้ว</th><th class="num">รออนุมัติ</th><th class="num">คงเหลือ</th></tr></thead><tbody>' +
           b.balances.map(function (x) { return '<tr><td>' + esc(x.name_th) + '</td><td class="num">' + x.granted + '</td><td class="num">' + x.used + '</td><td class="num">' + x.pending + '</td><td class="num' + (x.available < 0 ? ' neg' : '') + '">' + x.available + '</td></tr>'; }).join('') +
           '</tbody></table></div><p class="muted">ปีการลา ' + (b.balances[0] ? thaiDate(b.balances[0].leave_year_start) + ' – ' + thaiDate(b.balances[0].leave_year_end) : '') + '</p>' +
@@ -494,9 +532,18 @@
         api('saveEmployee', d).then(function (r) { var nid = (r && r.emp_id) || d.emp_id; toast(isNew ? 'เพิ่มพนักงานแล้ว รหัส ' + nid : 'บันทึกแล้ว'); api('setup').then(function (s) { A.setup = s; }); location.hash = '#emp/' + encodeURIComponent(nid); if (!isNew) viewEmployee(nid); })
           .catch(function (x) { document.getElementById('err').innerHTML = errorBox([x]); });
       });
+      var lc = document.getElementById('mkcode');
+      if (lc) lc.addEventListener('click', function () {
+        lc.disabled = true;
+        api('createLinkCode', { emp_id: id }).then(function (k) { showLinkCode(k); viewEmployee(id); }).catch(function (x) { lc.disabled = false; failSheet(x); });
+      });
+      var cc = document.getElementById('cancelcode');
+      if (cc) cc.addEventListener('click', function () {
+        api('cancelLinkCode', { emp_id: id }).then(function () { toast('ยกเลิกรหัสแล้ว'); viewEmployee(id); }).catch(failSheet);
+      });
       var ul = document.getElementById('unlink');
       if (ul) ul.addEventListener('click', function () {
-        openSheet('<h3>ยกเลิกการผูก LINE?</h3><p>ใช้เมื่อพนักงานเปลี่ยนบัญชี LINE หรือผูกผิดคน พนักงานต้องยืนยันตัวตนใหม่ในแอป</p><div class="btn-row"><button class="btn" data-close-btn>กลับ</button><button class="btn danger" id="go">ยกเลิกการผูก</button></div>', function (el) {
+        openSheet('<h3>ยกเลิกการผูก LINE?</h3><p>ใช้เมื่อหัวหน้างานเปลี่ยนเครื่อง/บัญชี LINE หรือผูกผิดคน จากนั้นสร้างรหัสผูก LINE ใหม่ให้</p><div class="btn-row"><button class="btn" data-close-btn>กลับ</button><button class="btn danger" id="go">ยกเลิกการผูก</button></div>', function (el) {
           el.querySelector('#go').addEventListener('click', function () { api('unlinkLine', { emp_id: id }).then(function () { closeSheet(); toast('ยกเลิกการผูก LINE แล้ว'); viewEmployee(id); }).catch(failSheet); });
         });
       });
@@ -504,7 +551,7 @@
       if (adj) adj.addEventListener('submit', function (ev) {
         ev.preventDefault();
         var d = formData(adj);
-        api('adjustBalance', { emp_id: id, type_id: d.type_id, delta: Number(d.delta), reason: d.reason }).then(function () { toast('ปรับยอดแล้ว แจ้งพนักงานทาง LINE แล้ว'); viewEmployee(id); }).catch(failSheet);
+        api('adjustBalance', { emp_id: id, type_id: d.type_id, delta: Number(d.delta), reason: d.reason }).then(function () { toast('ปรับยอดแล้ว'); viewEmployee(id); }).catch(failSheet);
       });
     }).catch(function (e) { $app.innerHTML = errorBox([e]); });
   }
@@ -541,7 +588,7 @@
           '<div class="field"><span style="font-weight:600;display:block;margin-bottom:6px">วันทำงาน</span>' + ['จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์', 'อาทิตย์'].map(function (n, i) {
             return '<label class="chk" style="display:inline-flex;margin-right:14px"><input type="checkbox" name="wd' + (i + 1) + '"' + (days.indexOf(String(i + 1)) !== -1 ? ' checked' : '') + '>' + n + '</label>';
           }).join('') + '</div><div class="form-grid">' +
-          [['self_service_after_months', 'ยื่นลาเองได้หลังทำงาน (เดือน)'], ['escalation_hours', 'ส่งต่อ Super-admin เมื่อค้าง (ชม.)'], ['dept_max_concurrent', 'ค่าเริ่มต้นลาพร้อมกันต่อแผนก'],
+          [['self_service_after_months', 'หัวหน้างานบันทึกให้ได้เมื่อพนักงานทำงานครบ (เดือน)'], ['escalation_hours', 'แจ้ง Super-admin เมื่อค้างอนุมัติ (ชม.)'], ['dept_max_concurrent', 'ค่าเริ่มต้นลาพร้อมกันต่อแผนก'], ['link_code_days', 'รหัสผูก LINE ใช้ได้ (วัน)'],
             ['cert_reminder_max', 'เตือนแนบใบรับรองแพทย์สูงสุด (ครั้ง)'], ['attachment_retention_months', 'เก็บไฟล์แนบ (เดือน)'], ['session_minutes', 'อายุการเข้าระบบผู้ดูแล (นาที)']].map(function (x) {
               return '<label class="field"><span>' + x[1] + '</span><input type="number" min="0" name="' + x[0] + '" value="' + esc(st[x[0]]) + '"></label>';
             }).join('') + '</div><div id="err"></div><button class="btn primary">บันทึกการตั้งค่า</button></form>';
@@ -605,7 +652,7 @@
     loading();
     api('adminUsers').then(function (list) {
       $app.innerHTML = '<div class="page-head"><h1>ผู้ใช้ระบบ (username)</h1><button class="btn sm primary" id="add">เพิ่มผู้ใช้</button></div>' +
-        '<p class="lead">พนักงานและหัวหน้าเข้าด้วย LINE ไม่ต้องสร้างที่นี่</p><div class="tbl-wrap"><table class="tbl"><thead><tr><th>ชื่อผู้ใช้</th><th>ชื่อ</th><th>บทบาท</th><th>LINE แจ้งเตือน</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
+        '<p class="lead">หัวหน้างานเข้าด้วย LINE (สร้างรหัสผูก LINE ที่หน้าพนักงาน) ไม่ต้องสร้างที่นี่</p><div class="tbl-wrap"><table class="tbl"><thead><tr><th>ชื่อผู้ใช้</th><th>ชื่อ</th><th>บทบาท</th><th>LINE แจ้งเตือน</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
         list.map(function (u) {
           return '<tr><td>' + esc(u.username) + '</td><td>' + esc(u.full_name) + '</td><td>' + esc(ROLE[u.role]) + '</td><td>' + (u.line_linked ? '✓' : '<span class="muted">ยังไม่ผูก</span>') + '</td><td>' +
             (!u.active ? 'ปิดใช้งาน' : u.locked ? 'ล็อกชั่วคราว' : u.must_change ? 'รอตั้งรหัสผ่าน' : 'ใช้งาน') + '</td><td class="num"><button class="btn sm" data-reset="' + esc(u.username) + '">รีเซ็ตรหัสผ่าน</button> ' +
@@ -723,7 +770,7 @@
   /* ------------------------------------------------------------ my account */
   function viewMe() {
     $app.innerHTML = '<div class="page-head"><h1>บัญชีของฉัน</h1></div><div class="grid2"><div>' + viewChangePassword(false) + '</div>' +
-      '<div class="panel"><h2 style="margin-top:0">รับแจ้งเตือนทาง LINE</h2><p>ผูก LINE ของคุณกับบัญชีนี้ เพื่อรับแจ้งเตือน เช่น ใบลาหัวหน้าแผนก ใบลาค้าง และแผนกที่มีคนลาซ้อน</p>' +
+      '<div class="panel"><h2 style="margin-top:0">รับแจ้งเตือนทาง LINE</h2><p>ผูก LINE ของคุณกับบัญชีนี้ เพื่อรับแจ้งเตือน เช่น ใบลาใหม่ที่รออนุมัติ คำขอยกเลิก ใบลาค้าง และแผนกที่มีคนลาซ้อน</p>' +
       '<button class="btn dark" id="lnk">สร้างรหัสผูก LINE</button><div id="lres"></div></div></div>';
     bindPassword();
     document.getElementById('lnk').addEventListener('click', function () {

@@ -205,3 +205,25 @@ input[readonly] { background: #F3F5F7; color: var(--ink-2, #3a4652); }
 .toolbar .dmy > input[type=text] { width: 140px; flex: 0 0 140px; min-height: 42px; }
 .toolbar .dmy-btn { flex-basis: 42px; }
 label.field > span.dmy { display: flex; font-weight: 400; margin-bottom: 0; }
+
+/* supervisor app */
+.chips.small { margin: 4px 0 12px; }
+.chips.small .chip-swatch { min-height: 72px; padding: 10px 10px 8px; }
+.chips.small .chip-num { font-size: 1.8rem; }
+.chips.small .chip-name { padding: 6px 10px 6px; font-size: .9rem; }
+.chips.small .chip-meta { padding: 0 10px 8px; }
+.seg { display: flex; gap: 6px; overflow-x: auto; margin: 4px 0 14px; padding-bottom: 2px; }
+.seg button { flex: 0 0 auto; min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid #AEB7C1; background: #fff; color: var(--ink-2); font-weight: 500; cursor: pointer; }
+.seg button[aria-selected=true] { background: var(--ink); border-color: var(--ink); color: #fff; }
+.seg button[aria-selected=true] .muted { color: #C9D2DB; }
+input.otp { font-size: 1.8rem; letter-spacing: .5em; text-align: center; font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.code-big { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 2.4rem; letter-spacing: .3em; font-weight: 700; text-align: center; background: var(--warn-bg, #FFF4D6); padding: 14px; border-radius: var(--radius-s); user-select: all; }
+@media print {
+  body.printing-slip > *:not(#slip-print) { display: none !important; }
+  #slip-print { display: block !important; }
+}
+#slip-print { display: none; }
+.slip { border: 2px dashed #9AA5B1; border-radius: 12px; padding: 24px; max-width: 520px; margin: 0 auto; font-size: 1.05rem; }
+.slip h2 { margin: 0 0 8px; }
+.slip .code-big { margin: 12px 0; }
+.slip ol { padding-left: 20px; margin: 8px 0 0; }
